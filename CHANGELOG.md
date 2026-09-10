@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
 ### Fixed
 - Removing a stale native dxgi.dll from a bottle now puts Wine's own marked
   builtin copy back in its place. Wine's loader only finds a builtin through
