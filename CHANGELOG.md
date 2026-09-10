@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- The Metal HUD can now be set per program. The bottle setting reaches every
+  process in the prefix, so turning it on to measure a game also drew the HUD
+  over the launcher's own windows, which the player is still clicking around
+  in. A program-level value keeps it on the title being measured; leaving it
+  unset inherits the bottle as before.
+
 ### Fixed
 - The Recommended graphics backend now resolves launchers (Steam and other
   Chromium-based clients) to DXVK on every runtime. Previously a runtime
