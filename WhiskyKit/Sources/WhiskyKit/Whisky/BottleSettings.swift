@@ -1023,8 +1023,14 @@ public struct BottleSettings: Codable, Equatable {
             }
             launcherProvidesLocale = fixDetails.contains { $0.key == "LC_ALL" }
 
-            // Auto-enable DXVK DLL overrides if launcher requires it
-            if autoEnableDXVK, launcher.requiresDXVK {
+            // Auto-enable DXVK DLL overrides if launcher requires it.
+            //
+            // Only for launchers wanting DXVK bottle-wide. A `.launcherProcesses`
+            // launcher gets the same preset written to its own `AppDefaults`
+            // keys in `WineDLLOverrideRegistry.applyDLLOverrides`, because these
+            // land in the bottle's `WINEDLLOVERRIDES`, which every child
+            // inherits -- that would take D3DMetal away from the games too.
+            if autoEnableDXVK, launcher.dxvkScope == .bottle {
                 for entry in DLLOverrideResolver.dxvkPreset {
                     launcherDLLOverrides.append((entry: entry, source: .launcher(launcher.displayName)))
                 }

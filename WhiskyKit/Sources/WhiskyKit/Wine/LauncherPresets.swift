@@ -254,16 +254,50 @@ public enum LauncherType: String, Codable, CaseIterable, Sendable, Identifiable 
         return env
     }
 
+    /// How far a launcher's DXVK requirement reaches.
+    ///
+    /// A launcher that cannot draw its own UI on the bottle's backend does not
+    /// necessarily want that backend replaced for the games it starts. Steam is
+    /// the case in point: its client renders in Chromium, which cannot present
+    /// on D3DMetal at all, while the games it launches are exactly what
+    /// D3DMetal is for.
+    public enum DXVKScope: Sendable {
+        /// DXVK for everything in the bottle, games included.
+        case bottle
+        /// DXVK for the launcher's own executables only, via `AppDefaults`.
+        ///
+        /// Games the launcher spawns keep the bottle's backend. `AppDefaults`
+        /// is the only override scope wine does not propagate to children,
+        /// which is what makes the split hold: a launcher and the game it
+        /// starts are a parent and its child.
+        case launcherProcesses
+    }
+
+    /// How this launcher needs DXVK applied, or `nil` if it does not need it.
+    ///
+    /// Some launchers will not render their UI without DXVK enabled.
+    public var dxvkScope: DXVKScope? {
+        switch self {
+        case .rockstar:
+            // Bottle-wide, as it has always been for Rockstar. Narrowing this
+            // to the launcher's own processes would change which backend its
+            // games run on, which is a separate behavioural change.
+            .bottle
+        case .steam:
+            // Steam draws its client in `steamwebhelper.exe` (Chromium), which
+            // renders black on D3DMetal and DXMT. Scoped to Steam's own
+            // executables so games in the same bottle keep D3DMetal.
+            .launcherProcesses
+        default:
+            nil
+        }
+    }
+
     /// Indicates whether this launcher requires DXVK to function.
     ///
     /// Some launchers (notably Rockstar) will not render their UI without DXVK enabled.
     public var requiresDXVK: Bool {
-        switch self {
-        case .rockstar:
-            true
-        default:
-            false
-        }
+        dxvkScope != nil
     }
 
     /// Executables this launcher spawns that must share its DLL overrides.

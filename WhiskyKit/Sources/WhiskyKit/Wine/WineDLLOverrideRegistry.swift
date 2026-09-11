@@ -109,10 +109,29 @@ public extension Wine {
         let helperOverrides = applyToDescendants
             ? (constructWineEnvironment(for: bottle)["WINEDLLOVERRIDES"] ?? "")
             : (wineEnvironment["WINEDLLOVERRIDES"] ?? "")
+
+        // A launcher that cannot render on the bottle's backend gets DXVK on its
+        // own executables only. `AppDefaults` is the one override scope wine does
+        // not propagate to children, so the games it spawns keep the bottle's
+        // backend -- which is the whole point: Steam's Chromium client cannot
+        // present on D3DMetal, and the games it starts are what D3DMetal is for.
+        //
+        // Applied here rather than in the launcher-managed environment layer
+        // because that layer feeds the bottle's `WINEDLLOVERRIDES`, which every
+        // child inherits.
+        // Detected from the launched URL, exactly as `helperExecutables` does.
+        // `settings.detectedLauncher` is not it: that is the user-facing
+        // launcher-fixes toggle, left nil on bottles that never opted in, while
+        // the DLL split has to hold for anyone who presses play on Steam.
+        let launcherScopedDXVK = LauncherType.detect(from: url)?.dxvkScope == .launcherProcesses
+        let launcherOverrides = launcherScopedDXVK
+            ? applying(DLLOverrideResolver.dxvkPreset, to: helperOverrides)
+            : helperOverrides
+
         for executable in helperExecutables(for: url) {
             scopes.append((
                 scope: .program(executable),
-                overrides: disablingNVAPI(in: helperOverrides)
+                overrides: disablingNVAPI(in: launcherOverrides)
             ))
         }
 
@@ -120,7 +139,18 @@ public extension Wine {
             let programOverrides = wineEnvironment.removeValue(forKey: "WINEDLLOVERRIDES") ?? ""
             // The launched executable needs its own entry too: AppDefaults is per
             // executable and children do not inherit it.
-            scopes.append((scope: .program(url.lastPathComponent), overrides: programOverrides))
+            //
+            // For a launcher whose DXVK is scoped to its own processes, this is
+            // the entry that carries it: without the preset merged in, the
+            // client falls through to the bottle scope -- D3DMetal, and a black
+            // window. Games are unaffected; they are launched separately and
+            // AppDefaults does not reach them from here.
+            scopes.append((
+                scope: .program(url.lastPathComponent),
+                overrides: launcherScopedDXVK
+                    ? applying(DLLOverrideResolver.dxvkPreset, to: programOverrides)
+                    : programOverrides
+            ))
         }
 
         try await syncDLLOverrides(bottle: bottle, scopes: scopes)
@@ -179,6 +209,24 @@ public extension Wine {
     static func disablingNVAPI(in overrides: String) -> String {
         var parsed = parseDLLOverrides(overrides)
         parsed["nvapi64"] = ""
+        return parsed.keys.sorted().map { "\($0)=\(parsed[$0] ?? "")" }.joined(separator: ";")
+    }
+
+    /// Merges override entries into an override string, entries winning.
+    ///
+    /// Used to put a launcher's DXVK preset on its own executables while the
+    /// bottle keeps a different backend. Whatever else the string carries is
+    /// preserved; only the named DLLs are replaced.
+    ///
+    /// - Parameters:
+    ///   - entries: The overrides to apply.
+    ///   - overrides: A `WINEDLLOVERRIDES`-syntax string, possibly empty.
+    /// - Returns: The merged string in the same syntax.
+    static func applying(_ entries: [DLLOverrideEntry], to overrides: String) -> String {
+        var parsed = parseDLLOverrides(overrides)
+        for entry in entries {
+            parsed[entry.dllName] = entry.mode.rawValue
+        }
         return parsed.keys.sorted().map { "\($0)=\(parsed[$0] ?? "")" }.joined(separator: ";")
     }
 

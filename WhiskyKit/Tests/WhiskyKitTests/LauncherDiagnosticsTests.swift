@@ -402,7 +402,7 @@ final class LauncherDiagnosticsTests: XCTestCase {
 
         let bottle = Bottle(bottleUrl: tempURL, inFlight: false, isAvailable: true)
         bottle.settings.launcherCompatibilityMode = true
-        bottle.settings.detectedLauncher = .steam // Steam doesn't require DXVK
+        bottle.settings.detectedLauncher = .steam // Steam's DXVK is scoped to its own processes
         bottle.settings.autoEnableDXVK = true
         bottle.settings.dxvk = false
         // Pin a builtin-backed backend: `.recommended` resolves via ambient
@@ -415,7 +415,9 @@ final class LauncherDiagnosticsTests: XCTestCase {
         var env: [String: String] = [:]
         bottle.settings.environmentVariables(wineEnv: &env)
 
-        // DXVK should NOT be auto-enabled (Steam doesn't require it)
+        // Steam's DXVK must not reach the bottle-wide overrides: every child
+        // inherits those, so the games it spawns would lose D3DMetal. It is
+        // written to Steam's own `AppDefaults` keys instead.
         XCTAssertNil(env["WINEDLLOVERRIDES"])
     }
 
@@ -423,8 +425,14 @@ final class LauncherDiagnosticsTests: XCTestCase {
 
     func testRockstarRequiresDXVK() {
         XCTAssertTrue(LauncherType.rockstar.requiresDXVK)
-        XCTAssertFalse(LauncherType.steam.requiresDXVK)
+        XCTAssertEqual(LauncherType.rockstar.dxvkScope, .bottle)
+        // Steam needs DXVK too, but only on its own executables: its client is
+        // Chromium, which cannot present on D3DMetal, while the games it starts
+        // are exactly what D3DMetal is for.
+        XCTAssertTrue(LauncherType.steam.requiresDXVK)
+        XCTAssertEqual(LauncherType.steam.dxvkScope, .launcherProcesses)
         XCTAssertFalse(LauncherType.eaApp.requiresDXVK)
+        XCTAssertNil(LauncherType.eaApp.dxvkScope)
     }
 
     func testRecommendedLocales() {

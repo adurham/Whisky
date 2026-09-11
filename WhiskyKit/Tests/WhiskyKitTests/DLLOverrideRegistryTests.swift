@@ -231,4 +231,94 @@ final class DLLOverrideRegistryTests: XCTestCase {
         XCTAssertTrue(doc.contains(#"[-HKCU\A]"#), "the prune must still be emitted")
         XCTAssertFalse(doc.contains(#"[HKCU\A]"#), "no empty key should be recreated")
     }
+
+    // MARK: - Launcher-scoped DXVK
+
+    /// Steam's client cannot present on D3DMetal, so it needs DXVK -- but only
+    /// on its own processes, or the games it spawns lose D3DMetal too.
+    func testSteamScopesDXVKToItsOwnProcesses() {
+        XCTAssertEqual(LauncherType.steam.dxvkScope, .launcherProcesses)
+    }
+
+    /// Rockstar has always taken DXVK bottle-wide. Narrowing it would change
+    /// which backend its games run on, which is not this change.
+    func testRockstarKeepsBottleWideDXVK() {
+        XCTAssertEqual(LauncherType.rockstar.dxvkScope, .bottle)
+    }
+
+    /// `requiresDXVK` gates the prefix DLL copy in `runProgram`, so it has to
+    /// stay true for both scopes or Steam gets overrides pointing at DLLs that
+    /// were never deployed.
+    func testRequiresDXVKCoversBothScopes() {
+        XCTAssertTrue(LauncherType.steam.requiresDXVK)
+        XCTAssertTrue(LauncherType.rockstar.requiresDXVK)
+        XCTAssertFalse(LauncherType.epicGames.requiresDXVK)
+    }
+
+    func testApplyingMergesPresetOverExistingOverrides() {
+        let merged = Wine.applying(DLLOverrideResolver.dxvkPreset, to: "dxgi=b;nvapi64=")
+        let parsed = Wine.parseDLLOverrides(merged)
+        // The preset wins on the DLLs it names.
+        XCTAssertEqual(parsed["dxgi"], "n,b")
+        XCTAssertEqual(parsed["d3d11"], "n,b")
+        // d3d12 is disabled by the preset, which is an empty value, not absence.
+        XCTAssertEqual(parsed["d3d12"], "")
+        // Anything the preset does not name survives.
+        XCTAssertEqual(parsed["nvapi64"], "")
+    }
+
+    func testApplyingLeavesUnrelatedOverridesAlone() {
+        let merged = Wine.applying(DLLOverrideResolver.dxvkPreset, to: "winemenubuilder=")
+        XCTAssertEqual(Wine.parseDLLOverrides(merged)["winemenubuilder"], "")
+    }
+
+    /// The bug this change fixes: with the preset merged only into the bottle
+    /// scope, every child inherits it and games lose D3DMetal. The launcher's
+    /// DXVK has to live in `AppDefaults`, which wine does not propagate.
+    func testLauncherScopedDXVKDoesNotLandInTheBottleScope() {
+        var builder = EnvironmentBuilder()
+        var settings = BottleSettings()
+        settings.autoEnableDXVK = true
+        settings.launcherCompatibilityMode = true
+        settings.detectedLauncher = .steam
+
+        let overrides = settings.populateLauncherManagedLayer(builder: &builder)
+
+        XCTAssertFalse(
+            overrides.contains { $0.entry.dllName == "dxgi" },
+            "Steam's DXVK must not reach the bottle-wide overrides"
+        )
+    }
+
+    /// The same path for Rockstar must keep filling the bottle scope.
+    func testBottleScopedLauncherStillPopulatesTheBottleOverrides() {
+        var builder = EnvironmentBuilder()
+        var settings = BottleSettings()
+        settings.autoEnableDXVK = true
+        settings.launcherCompatibilityMode = true
+        settings.detectedLauncher = .rockstar
+
+        let overrides = settings.populateLauncherManagedLayer(builder: &builder)
+
+        XCTAssertTrue(
+            overrides.contains { $0.entry.dllName == "dxgi" },
+            "Rockstar's DXVK must still apply bottle-wide"
+        )
+    }
+
+    /// The scope has to be reachable from the launched URL alone. Reading it
+    /// from `settings.detectedLauncher` silently did nothing: that field tracks
+    /// the launcher-fixes opt-in and is nil on bottles that never enabled it,
+    /// so Steam's client kept falling through to the bottle backend and drew a
+    /// black window.
+    func testLauncherScopeIsDetectableFromTheLaunchedURL() {
+        let steamURL = URL(filePath: "/Program Files (x86)/Steam/steam.exe")
+        XCTAssertEqual(LauncherType.detect(from: steamURL)?.dxvkScope, .launcherProcesses)
+
+        // A game under steamapps must NOT be treated as the launcher, or it
+        // would be handed DXVK and lose D3DMetal -- the exact regression this
+        // whole change exists to prevent.
+        let gameURL = URL(filePath: "/Program Files (x86)/Steam/steamapps/common/DS3/game.exe")
+        XCTAssertNil(LauncherType.detect(from: gameURL)?.dxvkScope)
+    }
 }

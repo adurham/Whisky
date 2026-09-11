@@ -278,9 +278,14 @@ public class Wine {
         // flag (honored only without a backend override, mirroring
         // applyProgramOverrides), or launcher auto-enable.
         let legacyProgramDXVK = programOverrides?.graphicsBackend == nil && programOverrides?.dxvk == true
+        // Detected from the URL as well as read from settings: a launcher whose
+        // DXVK is scoped to its own processes needs the prefix DLLs deployed
+        // whether or not the user ever turned launcher fixes on, or its
+        // `AppDefaults` overrides point at DLLs that were never copied in.
+        let launcherRequiresDXVK = bottle.settings.detectedLauncher?.requiresDXVK == true
+            || LauncherType.detect(from: url)?.dxvkScope == .launcherProcesses
         let shouldEnableDXVK = effectiveBackend == .dxvk || legacyProgramDXVK ||
-            (bottle.settings.autoEnableDXVK &&
-                bottle.settings.detectedLauncher?.requiresDXVK == true)
+            (bottle.settings.autoEnableDXVK && launcherRequiresDXVK)
 
         if shouldEnableDXVK {
             try enableDXVK(bottle: bottle)
