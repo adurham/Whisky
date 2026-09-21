@@ -290,7 +290,6 @@ public class Wine {
         if shouldEnableDXVK {
             try enableDXVK(bottle: bottle)
         }
-
         // Disable App Nap if requested to prevent macOS from throttling Wine processes.
         // Note: This token is held while the `wine start` launcher process runs. The actual
         // game process continues as a child of wineserver after the launcher exits. Full
@@ -698,6 +697,10 @@ public class Wine {
             in: bottle.url.appending(path: "drive_c").appending(path: "windows").appending(path: "syswow64"),
             withContentsIn: Wine.dxvkFolder.appending(path: "x32")
         )
+        // A bottle whose DLL setup is user-managed keeps its dxgi exactly as it
+        // is, whatever it is: that file is what the bottle's own overrides point
+        // at, and a launch has no business deciding it is stale.
+        guard !bottle.settings.dllOverridesAreUserManaged else { return }
         removeStaleNativeDXGI(prefixRoot: bottle.url)
     }
 
@@ -717,10 +720,20 @@ public class Wine {
     /// forwarder and the prefix needs a clean native copy instead, which is
     /// its own change. A builtin-marked file is never touched: that is wine's
     /// own fake DLL, exactly what DXVK expects to defer to.
+    ///
+    /// What is removed is DXMT's copy specifically, not any native dxgi
+    /// (``isDXMTResidue(_:payloadDXGI:)``). A prefix may hold a native dxgi that
+    /// is wine's own, marker-stripped, put there on purpose — deleting that one
+    /// is what black-screens a Chromium client, because wine cannot load a
+    /// builtin whose system32 placeholder is missing. The stale copy is
+    /// identifiable, so it is identified rather than assumed from the file being
+    /// native.
     static func removeStaleNativeDXGI(
         prefixRoot: URL,
         gptkOriginalsDXGI: URL = GPTKImporter.storeFolder
-            .appending(path: "originals").appending(path: "dxgi.dll")
+            .appending(path: "originals").appending(path: "dxgi.dll"),
+        dxmtPayloadDXGI: URL = Wine.dxmtFolder
+            .appending(path: "x64").appending(path: "dxgi.dll")
     ) {
         let fileManager = FileManager.default
         guard !fileManager.fileExists(atPath: gptkOriginalsDXGI.path(percentEncoded: false)) else { return }
@@ -728,7 +741,8 @@ public class Wine {
             let dxgi = prefixRoot.appending(path: "drive_c").appending(path: "windows")
                 .appending(path: dir).appending(path: "dxgi.dll")
             guard fileManager.fileExists(atPath: dxgi.path(percentEncoded: false)),
-                  (try? isNativePE(dxgi)) == true
+                  (try? isNativePE(dxgi)) == true,
+                  isDXMTResidue(dxgi, payloadDXGI: dxmtPayloadDXGI)
             else { continue }
             do {
                 try fileManager.removeItem(at: dxgi)
@@ -739,6 +753,29 @@ public class Wine {
                 )
             }
         }
+    }
+
+    /// Whether `url`'s `dxgi.dll` is DXMT's deployed copy, rather than any other
+    /// native one.
+    ///
+    /// The runtime's DXMT payload is the file ``enableDXMT(bottle:)`` copies into
+    /// the prefix, so the residue is exactly that file: same bytes. Comparing
+    /// content answers the only question that matters — "did a DXMT deploy put
+    /// this here" — where a size heuristic or the native marker alone also
+    /// matches a native dxgi a user deployed on purpose, which must not be
+    /// deleted. When the payload is not installed there is nothing to compare
+    /// against, and the answer is no: without a DXMT payload no DXMT deploy
+    /// happened.
+    ///
+    /// - Parameters:
+    ///   - url: The `dxgi.dll` to classify.
+    ///   - payloadDXGI: The runtime's DXMT `dxgi.dll`.
+    /// - Returns: `true` when the file is byte-identical to the payload's.
+    static func isDXMTResidue(_ url: URL, payloadDXGI: URL) -> Bool {
+        guard let candidate = try? Data(contentsOf: url),
+              let payload = try? Data(contentsOf: payloadDXGI)
+        else { return false }
+        return candidate == payload
     }
 
     /// Errors thrown by ``enableDXMT(bottle:)``.

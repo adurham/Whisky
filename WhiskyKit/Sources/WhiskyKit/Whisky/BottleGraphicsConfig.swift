@@ -161,6 +161,22 @@ public struct BottleGraphicsConfig: Codable, Equatable {
     /// `DXGIAdapter::nvngxDLLLocation` to find, the variable is inert.
     var metalFX: Bool = true
 
+    /// Whether this bottle's DLL overrides are managed outside Whisky.
+    ///
+    /// Off by default. On, a launch writes no `DllOverrides` key at all and
+    /// prunes nothing, so whatever the bottle's registry holds is left exactly
+    /// as it is. That is the only way to express a configuration Whisky's
+    /// one-backend-per-bottle model cannot: a launcher on DXVK while the games
+    /// it starts keep the bottle's D3DMetal, for instance, needs the bottle
+    /// scope and an `AppDefaults` entry to say different things, and no single
+    /// backend setting produces both. Such a bottle declares its overrides
+    /// user-managed and Whisky keeps its hands off them.
+    ///
+    /// Lives in the graphics config because that is what it qualifies: the
+    /// managed overrides are the backend's, so declining them is a statement
+    /// about the backend.
+    var dllOverridesUserManaged: Bool = false
+
     /// Whether games in this bottle may turn on DLSS frame generation.
     ///
     /// Off, and it should stay off until a title is known to survive it. The
@@ -190,5 +206,9 @@ public struct BottleGraphicsConfig: Codable, Equatable {
         // Off for a bottle written before the key existed, which is the same
         // answer the property default gives a new one.
         self.frameGeneration = (try? container.decodeIfPresent(Bool.self, forKey: .frameGeneration)) ?? false
+        // Managed by Whisky for every bottle written before the key existed.
+        self.dllOverridesUserManaged = (
+            try? container.decodeIfPresent(Bool.self, forKey: .dllOverridesUserManaged)
+        ) ?? false
     }
 }

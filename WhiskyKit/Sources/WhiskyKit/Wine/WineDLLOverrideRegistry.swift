@@ -43,23 +43,87 @@ public extension Wine {
         subsystem: "com.isaacmarovitz.WhiskyKit", category: "dll-overrides"
     )
 
-    /// Replaces the DLL overrides at each scope, in one import.
+    /// Merges the DLL overrides at each scope, in one import.
     ///
     /// One import rather than a `reg` call per value: each of those is a whole
     /// wine process, and a launch syncing a bottle plus a launcher and its
     /// helpers spent twenty-odd of them before starting anything.
     ///
+    /// A launch writes only the values that differ from what the prefix already
+    /// holds, compares them as instructions rather than as strings
+    /// (``canonicalMode(_:)``), and removes only names ``DLLOverrideAuthorship``
+    /// says it wrote whose value is still exactly what it left. Everything else
+    /// — the user's own values, or another tool's — is left as it is, down to
+    /// the spelling. A launch that agrees with the registry writes no document
+    /// at all and skips the import.
+    ///
     /// - Parameters:
     ///   - bottle: The bottle whose prefix registry is written.
     ///   - scopes: Each scope and the `WINEDLLOVERRIDES`-syntax string it
-    ///     should hold. An empty string clears that scope.
+    ///     contributes. An empty string contributes nothing to that scope, and a
+    ///     scope with no contribution is not touched.
     @MainActor
     static func syncDLLOverrides(
         bottle: Bottle, scopes: [(scope: DLLOverrideScope, overrides: String)]
     ) async throws {
-        let document = registryDocument(
-            for: scopes.map { (key: $0.scope.registryKey, overrides: parseDLLOverrides($0.overrides)) }
-        )
+        let planned = scopes.map {
+            (key: $0.scope.registryKey, overrides: parseDLLOverrides($0.overrides))
+        }
+        let authored = DLLOverrideAuthorship.load(fromBottle: bottle.url)
+        // What the prefix already holds. One query for the whole subtree rather
+        // than one per key, and it is what lets a launch whose overrides already
+        // match say nothing at all.
+        let held = try await readDLLOverrideKeys(bottle: bottle)
+
+        var writes: [DLLOverrideWrite] = []
+        var record = DLLOverrideAuthorship()
+        for scope in planned {
+            let existing = held[scope.key] ?? [:]
+            let renderable = scope.overrides.filter { isRenderable(dll: $0.key, mode: $0.value) }
+            // Only what differs. `native,builtin` and `n,b` are one instruction
+            // in two spellings, so a value that already resolves as this launch
+            // wants it is left exactly as written — including a hand-written
+            // spelling.
+            let setting = renderable.filter { name, mode in
+                guard let current = existing[name] else { return true }
+                return canonicalMode(current) != canonicalMode(mode)
+            }
+            // Only names this app wrote, and only while the value on disk is
+            // still the one it left. A name it wrote that the user has since
+            // edited is the user's now, and is not taken back.
+            let ours = authored.scopes[scope.key] ?? [:]
+            let removals = ours
+                .filter { name, mode in
+                    guard !scope.overrides.keys.contains(name) else { return false }
+                    guard let current = existing[name] else { return false }
+                    return canonicalMode(current) == canonicalMode(mode)
+                }
+                .keys.sorted()
+            if !setting.isEmpty || !removals.isEmpty {
+                writes.append(DLLOverrideWrite(key: scope.key, overrides: setting, remove: removals))
+            }
+            // The record follows the key: what this launch writes, plus whatever
+            // of ours it left standing. Names taken back are released.
+            var kept = ours
+            for name in removals {
+                kept.removeValue(forKey: name)
+            }
+            for (name, mode) in setting {
+                kept[name] = mode
+            }
+            if !kept.isEmpty {
+                record.scopes[scope.key] = kept
+            }
+        }
+
+        let document = registryDocument(for: writes)
+        // Nothing to write and nothing of ours to take back is not an
+        // instruction to empty anything: the launch has no opinion about these
+        // keys, so the registry is left as it is and no wine process is spent.
+        guard !document.isEmpty else {
+            dllOverrideLogger.debug("DLL overrides already match; leaving the registry untouched")
+            return
+        }
         let url = FileManager.default.temporaryDirectory
             .appending(path: "whisky-dll-overrides-\(UUID().uuidString).reg")
         // Wine detects a Unicode .reg by its BOM alone, and `.utf16LittleEndian`
@@ -72,6 +136,7 @@ public extension Wine {
         // `reg import`, not `regedit`: regedit has no silent switch, so it puts up
         // the import confirmation and never exits.
         try await runWine(["reg", "import", url.path(percentEncoded: false)], bottle: bottle)
+        record.save(toBottle: bottle.url)
         dllOverrideLogger.debug("Synced DLL overrides for \(scopes.count) scope(s) in one import")
     }
 
@@ -80,6 +145,11 @@ public extension Wine {
     /// Registry, not `WINEDLLOVERRIDES`: the variable is inherited by every child,
     /// so a launcher's backend became every game's, and wine reads it before the
     /// registry, which left `AppDefaults` entries dead while it was set.
+    ///
+    /// Only the bottle scope is written for the bottle's backend. The
+    /// per-executable scopes below are additive: a hand-written `AppDefaults`
+    /// entry for a launcher's exe is exactly the kind of value a launch must
+    /// never second-guess.
     ///
     /// - Parameter applyToDescendants: When the overrides describe something this
     ///   process will *spawn*, `AppDefaults` cannot express it — that is keyed on
@@ -91,21 +161,24 @@ public extension Wine {
         wineEnvironment: inout [String: String],
         applyToDescendants: Bool
     ) async throws {
+        // A bottle whose overrides are managed outside Whisky keeps them: no key
+        // is written and nothing is pruned. The flag exists because a
+        // configuration can be deliberate without being expressible here.
+        guard !bottle.settings.dllOverridesAreUserManaged else {
+            dllOverrideLogger.debug("DLL overrides are user-managed for this bottle; not syncing")
+            return
+        }
+
         var scopes: [(scope: DLLOverrideScope, overrides: String)] = [
             (scope: .bottle, overrides: constructWineEnvironment(for: bottle)["WINEDLLOVERRIDES"] ?? "")
         ]
 
         // The helper entries are written either way. A launcher's helper is
         // usually Chromium, which probes for an NVIDIA GPU on startup: answering
-        // makes it load D3DMetal and take the helper down, and a dead helper is a
-        // launcher that draws nothing. Games need nvapi64, because Streamline
+        // makes it load D3DMetal and take the helper down, and a dead helper is
+        // a launcher that draws nothing. Games need nvapi64, because Streamline
         // asks it about the GPU before it will consider DLSS at all, so it is
         // disabled per helper rather than withheld from the bottle.
-        //
-        // Outside the `applyToDescendants` branch on purpose. A Steam game launch
-        // sets that flag, and this sync *replaces* each key it writes, so leaving
-        // the helpers out did not merely skip them, it cleared any entry they
-        // already had and handed Chromium nvapi64 again.
         let helperOverrides = applyToDescendants
             ? (constructWineEnvironment(for: bottle)["WINEDLLOVERRIDES"] ?? "")
             : (wineEnvironment["WINEDLLOVERRIDES"] ?? "")
@@ -156,26 +229,60 @@ public extension Wine {
         try await syncDLLOverrides(bottle: bottle, scopes: scopes)
     }
 
-    /// Renders a `.reg` leaving each key holding exactly `overrides`.
+    /// One key's contribution to a sync: values to merge in, and names to remove.
     ///
-    /// `[-Key]` then `[Key]` is a replace, since `.reg` runs in order. That is
-    /// what prunes stale values without reading the key back first.
-    static func registryDocument(for scopes: [(key: String, overrides: [String: String])]) -> String {
+    /// A named type rather than a tuple: the two lists have different meanings —
+    /// one adds, one takes back what a previous launch added.
+    struct DLLOverrideWrite: Equatable {
+        /// The registry key to write.
+        let key: String
+        /// DLL name to load-order pairs to merge into the key.
+        let overrides: [String: String]
+        /// DLL names to remove from the key, by `.reg`'s `"name"=-` form.
+        let remove: [String]
+    }
+
+    /// Renders a `.reg` that merges `overrides` into each key and removes the
+    /// values named in `remove`.
+    ///
+    /// A `[Key]` block on its own is a **merge** to wine: it writes the values it
+    /// names and leaves everything else in the key alone. There is deliberately
+    /// no `[-Key]` line in this document. That form deletes the whole key, which
+    /// is how a launch used to take a user's own values with it — a bottle whose
+    /// backend contributes no overrides rendered an empty key and a delete, and
+    /// the delete is what emptied it. Removals are per value instead, via the
+    /// `.reg` `"name"=-` form, and only ever for names the caller declares it
+    /// owns.
+    ///
+    /// A scope with nothing to set and nothing to remove contributes no lines at
+    /// all, and a document with no such scope is empty. Writing nothing has to
+    /// mean "change nothing" — that is what keeps a backend with no overrides of
+    /// its own (D3DMetal, wined3d) from emptying a key it has no opinion about.
+    static func registryDocument(for scopes: [DLLOverrideWrite]) -> String {
         var lines = ["Windows Registry Editor Version 5.00", ""]
+        var wroteAnything = false
         for scope in scopes {
-            lines.append("[-\(scope.key)]")
-            lines.append("")
             let renderable = scope.overrides
                 .filter { isRenderable(dll: $0.key, mode: $0.value) }
                 .sorted { $0.key < $1.key }
-            guard !renderable.isEmpty else { continue }
+            let names = Set(renderable.map(\.key))
+            // A removal for a name this document also sets would delete what was
+            // just written, so the write wins.
+            let removals = scope.remove
+                .filter { isRenderable(dll: $0, mode: "") && !names.contains($0) }
+                .sorted()
+            guard !renderable.isEmpty || !removals.isEmpty else { continue }
+            wroteAnything = true
             lines.append("[\(scope.key)]")
             for (dll, mode) in renderable {
                 lines.append("\"\(dll)\"=\"\(mode)\"")
             }
+            for dll in removals {
+                lines.append("\"\(dll)\"=-")
+            }
             lines.append("")
         }
-        return lines.joined(separator: "\r\n")
+        return wroteAnything ? lines.joined(separator: "\r\n") : ""
     }
 
     /// Whether an override can be rendered without corrupting the document.
@@ -244,5 +351,50 @@ public extension Wine {
             result[dll] = parts.count > 1 ? String(parts[1]).trimmingCharacters(in: .whitespaces) : ""
         }
         return result
+    }
+
+    /// Which `DllOverrides` values this app wrote, per registry key.
+    ///
+    /// A launch writes overrides and, when the backend changes, has to take back
+    /// the ones its previous launch wrote — clearing a key wholesale was how a
+    /// launch used to destroy values it did not own, and reading the key back
+    /// cannot tell an old Whisky value from a user's. This record can: it names
+    /// exactly what was written and with which mode, so only those names are
+    /// ever removable, and only while the value on disk is still the one that
+    /// was left. A value the user has since edited is theirs.
+    ///
+    /// Kept beside the bottle's other metadata rather than in the prefix, so it
+    /// is per bottle and survives a prefix reset. Absent means a bottle no
+    /// launch of this build has written — older bottles, or one whose overrides
+    /// are hand-managed — and nothing is then removable, which is the safe
+    /// answer.
+    struct DLLOverrideAuthorship: Codable, Equatable {
+        /// Registry key to the DLL name and mode last written there by a launch.
+        var scopes: [String: [String: String]] = [:]
+
+        /// The file this record lives in, inside the bottle folder.
+        static let fileName = "DLLOverrideAuthorship.json"
+
+        /// Reads the record for a bottle, or an empty one when there is none.
+        static func load(fromBottle bottleURL: URL) -> DLLOverrideAuthorship {
+            let url = bottleURL.appending(path: fileName)
+            guard let data = try? Data(contentsOf: url),
+                  let record = try? JSONDecoder().decode(DLLOverrideAuthorship.self, from: data)
+            else { return DLLOverrideAuthorship() }
+            return record
+        }
+
+        /// Writes the record, or removes it when it holds nothing.
+        func save(toBottle bottleURL: URL) {
+            let url = bottleURL.appending(path: Self.fileName)
+            guard !scopes.isEmpty else {
+                try? FileManager.default.removeItem(at: url)
+                return
+            }
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            guard let data = try? encoder.encode(self) else { return }
+            try? data.write(to: url, options: .atomic)
+        }
     }
 }

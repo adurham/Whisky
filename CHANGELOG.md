@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- A launch no longer rewrites the bottle's `DllOverrides` registry keys: it
+  merges the overrides it owns and leaves every other value alone. Previously
+  the sync deleted and re-created the whole key from the selected backend, so
+  a backend contributing no overrides of its own (D3DMetal, wined3d) emptied a
+  key it had no opinion about — taking user-set overrides with it and leaving
+  Chromium-based launchers such as Steam on a translation layer they cannot
+  render, which showed as a solid black page in the client. Values a previous
+  launch of this app wrote are still taken back when the backend changes, but
+  through a record of what was written rather than a wholesale delete.
+- Enabling DXVK no longer removes a `system32/dxgi.dll` that is not DXMT's own
+  copy. The removal matched any markerless native dxgi, which includes wine's
+  own marker-stripped deployment; deleting that one makes
+  `LoadLibrary("dxgi.dll")` fail and turns a Chromium client's page black.
+  DXMT's copy is byte-identical to the runtime payload, so it is identified by
+  content and nothing else is touched.
+- A bottle can now declare its DLL overrides user-managed
+  (`graphicsConfig.dllOverridesUserManaged`), and a launch then writes no
+  `DllOverrides` key at all and leaves the prefix `dxgi.dll` alone. This is for
+  configurations the one-backend-per-bottle model cannot express — a launcher
+  on DXVK while the games it starts keep D3DMetal, for instance.
 - The Recommended graphics backend now resolves launchers (Steam and other
   Chromium-based clients) to DXVK on every runtime. Previously a runtime
   without the D3DMetal payload resolved launchers to DXMT, whose Direct3D

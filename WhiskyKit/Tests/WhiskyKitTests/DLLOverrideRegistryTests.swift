@@ -117,34 +117,57 @@ final class DLLOverrideRegistryTests: XCTestCase {
 
     // MARK: - Registry document
 
-    func testDocumentReplacesEachKey() {
+    /// The heart of the fix: a document must merge, never replace. `[-Key]`
+    /// deletes the whole key, which is how a launch used to take values it never
+    /// wrote with it.
+    func testDocumentMergesEachKeyInsteadOfReplacingIt() {
         let doc = Wine.registryDocument(for: [
-            (key: #"HKCU\Software\Wine\DllOverrides"#, overrides: ["d3d11": "n,b"])
+            Wine.DLLOverrideWrite(key: #"HKCU\Software\Wine\DllOverrides"#, overrides: ["d3d11": "n,b"], remove: [])
         ])
         XCTAssertTrue(doc.hasPrefix("Windows Registry Editor Version 5.00"))
-        // the delete has to come before the write, or it removes what it just wrote
-        let deleteAt = doc.range(of: #"[-HKCU\Software\Wine\DllOverrides]"#)
-        let writeAt = doc.range(of: #"[HKCU\Software\Wine\DllOverrides]"#)
-        XCTAssertNotNil(deleteAt)
-        XCTAssertNotNil(writeAt)
-        if let deleteAt, let writeAt {
-            XCTAssertLessThan(deleteAt.lowerBound, writeAt.lowerBound)
-        }
+        XCTAssertFalse(
+            doc.contains(#"[-HKCU\Software\Wine\DllOverrides]"#),
+            "a delete-key line would remove values this document does not own"
+        )
+        XCTAssertTrue(doc.contains(#"[HKCU\Software\Wine\DllOverrides]"#))
         XCTAssertTrue(doc.contains(#""d3d11"="n,b""#))
     }
 
-    /// An empty scope must still be deleted, since clearing a backend has to
-    /// remove what the previous one wrote.
-    func testEmptyScopeDeletesWithoutRewriting() {
-        let doc = Wine.registryDocument(for: [(key: #"HKCU\X"#, overrides: [:])])
-        XCTAssertTrue(doc.contains(#"[-HKCU\X]"#))
-        XCTAssertFalse(doc.contains("\r\n[HKCU\\X]"))
+    /// A scope with nothing to write must contribute no lines at all: writing
+    /// nothing has to mean "change nothing". This is the case that emptied the
+    /// global key, because D3DMetal contributes no overrides.
+    func testEmptyScopeContributesNothing() {
+        let doc = Wine.registryDocument(for: [Wine.DLLOverrideWrite(key: #"HKCU\X"#, overrides: [:], remove: [])])
+        XCTAssertTrue(doc.isEmpty, "an empty scope must render no document at all")
+        XCTAssertFalse(doc.contains("[-HKCU\\X]"))
+        XCTAssertFalse(doc.contains("[HKCU\\X]"))
+    }
+
+    /// Removing one value is `"name"=-`, which leaves every other value in the
+    /// key alone — the per-value form of the old whole-key delete.
+    func testRemovalsRenderAsPerValueDeletes() {
+        let doc = Wine.registryDocument(for: [
+            Wine.DLLOverrideWrite(key: #"HKCU\A"#, overrides: [:], remove: ["dxgi", "d3d11"])
+        ])
+        XCTAssertTrue(doc.contains(#""d3d11"=-"#))
+        XCTAssertTrue(doc.contains(#""dxgi"=-"#))
+        XCTAssertTrue(doc.contains(#"[HKCU\A]"#))
+        XCTAssertFalse(doc.contains(#"[-HKCU\A]"#))
+    }
+
+    /// A name in both lists would be deleted right after being written.
+    func testAWriteBeatsARemovalOfTheSameName() {
+        let doc = Wine.registryDocument(for: [
+            Wine.DLLOverrideWrite(key: #"HKCU\A"#, overrides: ["dxgi": "n,b"], remove: ["dxgi"])
+        ])
+        XCTAssertTrue(doc.contains(#""dxgi"="n,b""#))
+        XCTAssertFalse(doc.contains(#""dxgi"=-"#))
     }
 
     func testAllScopesLandInOneDocument() {
         let doc = Wine.registryDocument(for: [
-            (key: #"HKCU\A"#, overrides: ["d3d11": "n,b"]),
-            (key: #"HKCU\B"#, overrides: ["dxgi": "b"])
+            Wine.DLLOverrideWrite(key: #"HKCU\A"#, overrides: ["d3d11": "n,b"], remove: []),
+            Wine.DLLOverrideWrite(key: #"HKCU\B"#, overrides: ["dxgi": "b"], remove: [])
         ])
         XCTAssertTrue(doc.contains(#"[HKCU\A]"#))
         XCTAssertTrue(doc.contains(#"[HKCU\B]"#))
@@ -153,7 +176,7 @@ final class DLLOverrideRegistryTests: XCTestCase {
 
     func testValuesAreOrderedDeterministically() {
         let doc = Wine.registryDocument(for: [
-            (key: #"HKCU\A"#, overrides: ["dxgi": "b", "d3d11": "n,b", "d3d9": "n,b"])
+            Wine.DLLOverrideWrite(key: #"HKCU\A"#, overrides: ["dxgi": "b", "d3d11": "n,b", "d3d9": "n,b"], remove: [])
         ])
         guard let d3d11 = doc.range(of: #""d3d11""#)?.lowerBound,
               let d3d9 = doc.range(of: #""d3d9""#)?.lowerBound,
@@ -164,7 +187,11 @@ final class DLLOverrideRegistryTests: XCTestCase {
     }
 
     func testDocumentUsesCRLF() {
-        let doc = Wine.registryDocument(for: [(key: #"HKCU\A"#, overrides: ["d3d11": "n,b"])])
+        let doc = Wine.registryDocument(for: [Wine.DLLOverrideWrite(
+            key: #"HKCU\A"#,
+            overrides: ["d3d11": "n,b"],
+            remove: []
+        )])
         XCTAssertTrue(doc.contains("\r\n"))
     }
 
@@ -173,7 +200,11 @@ final class DLLOverrideRegistryTests: XCTestCase {
     func testWrittenDocumentStartsWithAUTF16LEBOM() throws {
         // Wine detects a Unicode .reg by its BOM alone. Without one the file parses
         // as ANSI, matches no header, and the import silently does nothing.
-        let doc = Wine.registryDocument(for: [(key: #"HKCU\A"#, overrides: ["d3d11": "n,b"])])
+        let doc = Wine.registryDocument(for: [Wine.DLLOverrideWrite(
+            key: #"HKCU\A"#,
+            overrides: ["d3d11": "n,b"],
+            remove: []
+        )])
         let url = FileManager.default.temporaryDirectory.appending(path: "bom-\(UUID().uuidString).reg")
         try ("\u{FEFF}" + doc).write(to: url, atomically: true, encoding: .utf16LittleEndian)
         defer { try? FileManager.default.removeItem(at: url) }
@@ -183,7 +214,11 @@ final class DLLOverrideRegistryTests: XCTestCase {
     }
 
     func testWrittenDocumentRoundTripsThroughAUTF16Reader() throws {
-        let doc = Wine.registryDocument(for: [(key: #"HKCU\A"#, overrides: ["d3d11": "n,b"])])
+        let doc = Wine.registryDocument(for: [Wine.DLLOverrideWrite(
+            key: #"HKCU\A"#,
+            overrides: ["d3d11": "n,b"],
+            remove: []
+        )])
         let url = FileManager.default.temporaryDirectory.appending(path: "rt-\(UUID().uuidString).reg")
         try ("\u{FEFF}" + doc).write(to: url, atomically: true, encoding: .utf16LittleEndian)
         defer { try? FileManager.default.removeItem(at: url) }
@@ -218,7 +253,11 @@ final class DLLOverrideRegistryTests: XCTestCase {
 
     func testOneBadOverrideDoesNotTakeTheDocumentDown() {
         let doc = Wine.registryDocument(for: [
-            (key: #"HKCU\A"#, overrides: [#"bad"name"#: "native", "d3d11": "native,builtin"])
+            Wine.DLLOverrideWrite(
+                key: #"HKCU\A"#,
+                overrides: [#"bad"name"#: "native", "d3d11": "native,builtin"],
+                remove: []
+            )
         ])
         XCTAssertTrue(doc.contains(#""d3d11"="native,builtin""#), "the good override must survive")
         XCTAssertFalse(doc.contains("bad"), "the unrenderable one must be dropped")
@@ -226,10 +265,12 @@ final class DLLOverrideRegistryTests: XCTestCase {
         XCTAssertEqual(doc.components(separatedBy: "\r\n").filter { $0.hasPrefix("\"") }.count, 1)
     }
 
-    func testScopeWhoseOverridesAreAllUnrenderableIsStillPruned() {
-        let doc = Wine.registryDocument(for: [(key: #"HKCU\A"#, overrides: [#"bad"name"#: "native"])])
-        XCTAssertTrue(doc.contains(#"[-HKCU\A]"#), "the prune must still be emitted")
-        XCTAssertFalse(doc.contains(#"[HKCU\A]"#), "no empty key should be recreated")
+    func testScopeWhoseOverridesAreAllUnrenderableContributesNothing() {
+        let doc = Wine.registryDocument(for: [
+            Wine.DLLOverrideWrite(key: #"HKCU\A"#, overrides: [#"bad"name"#: "native"], remove: [])
+        ])
+        XCTAssertTrue(doc.isEmpty, "nothing renderable means nothing written, not an empty key")
+        XCTAssertFalse(doc.contains(#"[HKCU\A]"#))
     }
 
     // MARK: - Launcher-scoped DXVK

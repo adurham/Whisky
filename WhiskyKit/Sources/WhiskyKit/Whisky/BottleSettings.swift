@@ -688,6 +688,19 @@ public struct BottleSettings: Codable, Equatable {
         set { customDLLOverrides = newValue }
     }
 
+    /// Whether this bottle's registry DLL overrides are managed outside Whisky.
+    ///
+    /// On, a launch leaves `HKCU\Software\Wine\DllOverrides` and every
+    /// `AppDefaults` entry under it completely alone, and does not touch the
+    /// prefix's `dxgi.dll` either. For a bottle whose overrides were written by
+    /// hand — a launcher on DXVK alongside games on D3DMetal, which no single
+    /// backend setting expresses — this is the switch that stops a launch from
+    /// reasserting the model over them.
+    public var dllOverridesAreUserManaged: Bool {
+        get { graphicsConfig.dllOverridesUserManaged }
+        set { graphicsConfig.dllOverridesUserManaged = newValue }
+    }
+
     // MARK: - Cleanup and clipboard settings
 
     /// The clipboard handling policy for this bottle.
