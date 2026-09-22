@@ -110,6 +110,21 @@ static int game_alive(void)
 }
 
 /* The desktop mode we consider correct: density 2.0 on the main display. */
+/* Is the display genuinely usable, not merely on a mode that LOOKS right?
+ *
+ * The previous check asked only "is the current mode density 2.0", which
+ * modes 149 AND 150 both satisfy -- so a display left on the wrong one of
+ * them reported "HiDPI restored" while the user still saw a squeezed desktop
+ * and had to alt-tab.  Verifying a mode's properties is not verifying the
+ * result.
+ *
+ * What actually distinguishes a healthy desktop:
+ *   - a density-2.0 (scaled HiDPI) mode, AND
+ *   - no display capture outstanding, AND
+ *   - no onscreen window owned by a bottle process covering the desktop, AND
+ *   - the menu bar / Dock present at the expected size (WindowServer owns
+ *     them; if the compositor is confused they go missing or resize).
+ */
 static int main_mode_ok(int *cur_out, float *density_out)
 {
     CGDirectDisplayID d = CGMainDisplayID();
@@ -121,6 +136,53 @@ static int main_mode_ok(int *cur_out, float *density_out)
     if (cur_out) *cur_out = cur;
     if (density_out) *density_out = desc.density;
     return (desc.density >= 1.9f) ? 1 : 0;
+}
+
+/* The stronger check: mode properties AND the compositor actually being sane.
+ * Returns 1 only when the desktop is genuinely back. */
+static pid_t find_covering_window(char *owner_out, size_t n, CGRect *rect_out);
+
+static int desktop_really_usable(int *cur_out, float *density_out)
+{
+    if (main_mode_ok(cur_out, density_out) != 1) return 0;
+    if (CGDisplayIsCaptured(CGMainDisplayID())) return 0;
+
+    /* A bottle-owned window covering the display with no game running is the
+     * signature of the stale-covering-window fault. */
+    char owner[128] = {0}; CGRect r = CGRectZero;
+    if (find_covering_window(owner, sizeof owner, &r)) return 0;
+
+    /* The menu bar belongs to "Window Server" -- note the SPACE in the owner
+     * name here, unlike the process name "WindowServer".  Measured on a healthy
+     * desktop: owner="Window Server", layer=24, bounds=(0,0 3440x30) with the
+     * display 3440 wide.  Matching on the process-name spelling found nothing
+     * and made this check report the desktop as broken when it was fine. */
+    CFArrayRef list = CGWindowListCopyWindowInfo(
+        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+        kCGNullWindowID);
+    if (!list) return 0;
+    int menubar_ok = 0;
+    CGDirectDisplayID main_id = CGMainDisplayID();
+    CGRect db = CGDisplayBounds(main_id);
+    CFIndex n = CFArrayGetCount(list);
+    for (CFIndex i = 0; i < n && !menubar_ok; i++) {
+        CFDictionaryRef w = CFArrayGetValueAtIndex(list, i);
+        CFStringRef ownerName = CFDictionaryGetValue(w, kCGWindowOwnerName);
+        if (!ownerName) continue;
+        char on[128] = {0};
+        CFStringGetCString(ownerName, on, sizeof on, kCFStringEncodingUTF8);
+        if (strcmp(on, "Window Server") != 0 && strcmp(on, "WindowServer") != 0)
+            continue;
+        CGRect wr = CGRectZero;
+        CFDictionaryRef bd = CFDictionaryGetValue(w, kCGWindowBounds);
+        if (!bd || !CGRectMakeWithDictionaryRepresentation(bd, &wr)) continue;
+        /* the menu-bar strip: full display width, short, at the top */
+        if (wr.origin.y <= 2 && wr.size.width >= db.size.width - 2 &&
+            wr.size.height > 0 && wr.size.height < 80)
+            menubar_ok = 1;
+    }
+    CFRelease(list);
+    return menubar_ok;
 }
 
 /* Find an onscreen window wide enough to cover the desktop that belongs to a
@@ -164,16 +226,47 @@ static void capture_evidence(const char *tag, const char *why)
     char cmd[2048];
     snprintf(cmd, sizeof cmd,
         "{ echo 'WHY: %s'; echo; "
+        "echo '=== faultprobe (mode / bounds / origin / capture / drawn extents) ==='; "
+        "  /Users/adam.durham/whisky-gptk-writeup/scripts/faultprobe '%s' '%s' 2>&1; "
         "echo '=== modeprobe ==='; /tmp/modeprobe 3440 2>&1; "
         "echo '=== all onscreen windows ==='; /tmp/winall 2>&1; "
         "echo '=== bottle processes ==='; ps ax -o pid,ppid,lstart,%%cpu,state,command | "
         "  grep -iE 'DarkSouls|steam|wine|mode-fixup|explorer.exe|Whisky' | grep -v grep; "
+        "echo '=== does the game process carry WHISKY_EXTERNAL_MODE_CONTROL? ==='; "
+        "  ps ax -o pid=,command= | grep -iE 'DarkSouls' | grep -v grep | head -3 | "
+        "  while read p c; do printf '  pid %%s: ' \"$p\"; ps eww -p \"$p\" 2>/dev/null | "
+        "  tr ' ' '\\n' | grep -c WHISKY_EXTERNAL_MODE_CONTROL; done; "
         "echo '=== mode-fixup log tail ==='; tail -40 /tmp/mode-fixup.log 2>/dev/null; "
         "echo '=== WindowServer last 2m ==='; /usr/bin/log show --last 2m "
         "  --predicate 'process == \"WindowServer\"' 2>/dev/null | tail -60; "
-        "} > '%s/snapshot.txt' 2>&1", why, dir);
+        "} > '%s/snapshot.txt' 2>&1", why, tag, why, dir);
     system(cmd);
     logline("CAPTURE %s -> %s\n", why, dir);
+}
+
+/* Release a display capture that outlived the process which took it.
+ *
+ * MEASURED FAULT: after a game exits, CGDisplayIsCaptured() can still report 1
+ * with no game alive, and a CAPTURED display REFUSES mode changes -- an
+ * attempt to restore the desktop mode lands on a different mode instead
+ * (observed: re-assert mode 149 -> ended up on mode 99, a 1x mode with the
+ * same point size).  Wine takes the capture in winemac's cocoa_app.m
+ * (CGCaptureAllDisplays) when a window needs the display exclusively, and its
+ * release path is conditional on state that can already be cleared by the time
+ * the game tears down, so the capture leaks.
+ *
+ * Releasing it is the prerequisite for restoring the mode.  Done in a child
+ * process for the same reason the mode work is: CGCompleteDisplayConfiguration
+ * blinds the caller's view of the display permanently. */
+static void release_display_capture(void)
+{
+    system("env -u DYLD_INSERT_LIBRARIES /usr/bin/python3 -c \""
+           "import ctypes, ctypes.util;"
+           "cg = ctypes.CDLL(ctypes.util.find_library('CoreGraphics'));"
+           "cg.CGMainDisplayID.restype = ctypes.c_uint32;"
+           "cg.CGReleaseAllDisplays.restype = ctypes.c_int32;"
+           "cg.CGReleaseAllDisplays()\" >/dev/null 2>&1");
+    logline("RECOVER released display capture\n");
 }
 
 /* Re-assert the desktop mode from a FRESH CHILD PROCESS. Never in-process:
@@ -244,6 +337,15 @@ int main(void)
             faulted = 1;
             snprintf(why, sizeof why,
                      "main display on a non-HiDPI mode %d (density %.1f) with no game alive", cur, d);
+        } else if (!desktop_really_usable(&cur, &d)) {
+            /* The mode looks right but the desktop is not back: the menu bar is
+             * missing or misplaced, or something still covers the display.
+             * Checking only the mode's properties previously made this watcher
+             * report success while the user still saw a broken screen. */
+            faulted = 1;
+            snprintf(why, sizeof why,
+                     "mode %d is density %.1f but the desktop is not usable "
+                     "(menu bar absent/misplaced or a window still covering)", cur, d);
         }
 
         if (!faulted) { bad_streak = 0; recovered_for_this_fault = 0;
@@ -262,14 +364,44 @@ int main(void)
             sleep(2);
             if (kill(coverer, 0) == 0) { kill(coverer, SIGKILL); sleep(1); }
         }
-        if (good_mode >= 0 && main_mode_ok(NULL, NULL) != 1)
+
+        /* A leaked capture MUST be released before the mode can be changed:
+         * a captured display refuses reconfiguration, and the attempt then
+         * lands on some other mode with the same point size (observed: asked
+         * for 149, ended up on 99). */
+        if (CGDisplayIsCaptured(CGMainDisplayID())) {
+            release_display_capture();
+            sleep(1);
+        }
+
+        if (good_mode >= 0 && main_mode_ok(NULL, NULL) != 1) {
             reassert_desktop_mode(good_mode);
+            /* Re-asserting is not always enough on the first try: the mode
+             * change lands only once the capture is gone and WindowServer has
+             * settled. One retry, then stop -- never loop reconfigures. */
+            sleep(2);
+            if (main_mode_ok(NULL, NULL) != 1) {
+                logline("RECOVER first re-assert did not settle; retrying once\n");
+                reassert_desktop_mode(good_mode);
+            }
+        }
 
         sleep(2);
         int after = -1; float ad = 0;
-        int ok = main_mode_ok(&after, &ad);
+        /* Judge by whether the DESKTOP is usable, not by whether the mode's
+         * properties look right -- that distinction is the whole point. */
+        int ok = desktop_really_usable(&after, &ad);
+        if (!ok) {
+            /* One more attempt, then stop. Never loop reconfigures: that is how
+             * a display gets stranded. */
+            logline("RECOVER not usable after first attempt; retrying once\n");
+            if (CGDisplayIsCaptured(CGMainDisplayID())) release_display_capture();
+            reassert_desktop_mode(good_mode >= 0 ? good_mode : 149);
+            sleep(2);
+            ok = desktop_really_usable(&after, &ad);
+        }
         logline("RECOVER result: mode %d density %.1f -> %s\n", after, ad,
-                ok == 1 ? "HiDPI restored" : "STILL WRONG (left alone; see evidence)");
+                ok ? "desktop verified usable" : "STILL NOT USABLE -- needs the user's attention");
         recovered_for_this_fault = 1;
     }
     return 0;

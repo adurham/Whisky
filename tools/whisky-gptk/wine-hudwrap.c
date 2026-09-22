@@ -162,6 +162,26 @@ int main(int argc, char **argv)
     if (is_game) {
         setenv("MTL_HUD_ENABLED", "1", 1);
 
+        /* Hand the display mode to mode-fixup alone.
+         *
+         * Two writers cannot share one display.  mode-fixup switches the
+         * display to the game's resolution for the game's lifetime; if wine
+         * ALSO manages the mode, its setMode: runs afterwards, finds the game
+         * resolution already current, and records THAT as the "original" mode
+         * to restore -- so on exit it re-applies the game's mode straight over
+         * mode-fixup's correct desktop restore (observed in the log as
+         * "game set 2560x1440" immediately after "restored desktop").
+         *
+         * wine's own restore could not work for this display anyway: it uses
+         * CGDisplaySetDisplayMode with a mode ref, which fails with
+         * kCGErrorFailure (1000) for the scaled HiDPI desktop mode.
+         *
+         * With the flag set, winemac.drv leaves display modes alone entirely.
+         * It still captures displays, so fullscreen still hides the menu bar
+         * and Dock.  Trade-off: a game that changes resolution WHILE running
+         * will no longer be honoured by the driver. */
+        setenv("WHISKY_EXTERNAL_MODE_CONTROL", "1", 1);
+
         /* Cap the refresh rate wine picks for this game's fullscreen mode.
          *
          * ONE helper per bottle, not one per exec. The wine loader re-execs

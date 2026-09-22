@@ -154,6 +154,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>   /* strcasecmp */
 #include <unistd.h>
 #include <signal.h>
 #include <spawn.h>
@@ -217,6 +218,40 @@ static void  (*pCGSGetCurrentDisplayMode)(CGDirectDisplayID, int *);
 static void  (*pCGSGetNumberOfDisplayModes)(CGDirectDisplayID, int *);
 static void  (*pCGSGetDisplayModeDescriptionOfLength)(CGDirectDisplayID, int, modes_D4 *, int);
 static void  (*pCGSConfigureDisplayMode)(CGDisplayConfigRef, CGDirectDisplayID, int);
+/* Variable-refresh query. THE SIGNATURE MATTERS: it is
+ *     int SLSIsDisplayModeVRR(CGDirectDisplayID display, int IODisplayModeID)
+ * and NOT SLSIsDisplayModeVRR(CGDisplayModeRef).  Declaring it against a
+ * CGDisplayModeRef makes every call return 0, which reads as "this display
+ * has no VRR at all" -- a false conclusion that cost hours once already. */
+static int   (*pSLSIsDisplayModeVRR)(CGDirectDisplayID, int);
+
+static int load_cgs(void);   /* defined below; used by the VRR lookup */
+
+/* Find the VRR-capable SkyLight mode matching a 5-tuple description.
+ *
+ * Several modes can describe identically to public CoreGraphics while only one
+ * of them offers variable refresh, so the 5-tuple alone cannot pick correctly.
+ * Returns the mode NUMBER, or -1 when SkyLight is unavailable or nothing
+ * matches. Read-only: enumerating modes is not configuring one. */
+static int sky_vrr_mode_number(CGDirectDisplayID d, size_t pw, size_t ph,
+                               size_t ptw, size_t pth, double hz) {
+    if (!load_cgs()) return -1;
+    if (!pSLSIsDisplayModeVRR) {
+        pSLSIsDisplayModeVRR = dlsym(g_sl, "SLSIsDisplayModeVRR");
+        if (!pSLSIsDisplayModeVRR) return -1;
+    }
+    int total = 0;
+    pCGSGetNumberOfDisplayModes(d, &total);
+    for (int i = 0; i < total; i++) {
+        modes_D4 m; memset(&m, 0, sizeof m);
+        pCGSGetDisplayModeDescriptionOfLength(d, i, &m, sizeof m);
+        if (m.d.width != pw || m.d.height != ph) continue;
+        if (m.d.width != ptw || m.d.height != pth) continue;   /* 1:1 only */
+        if (hz > 0 && (double)m.d.freq != hz) continue;
+        if (pSLSIsDisplayModeVRR(d, i)) return i;
+    }
+    return -1;
+}
 
 static int load_cgs(void) {
     if (g_sl) return 1;
@@ -278,6 +313,37 @@ static int child_cgsapply(int modeNum) {
  * own built-in panel. */
 static int child_apply(size_t pw, size_t ph, size_t ptw, size_t pth, double hz) {
     CGDirectDisplayID d = CGMainDisplayID();
+
+    /* Prefer a VARIABLE-REFRESH mode when several modes describe identically.
+     *
+     * Public CoreGraphics cannot tell these apart: on an AW3425DW the four
+     * 2560x1440 entries are indistinguishable to CGDisplayCopyAllDisplayModes,
+     * yet only ONE of them carries the VRR flag (mode 95 - the others, 96/97/98,
+     * are fixed-refresh).  Picking the wrong one costs variable refresh, and
+     * without it any frame that runs slightly over budget waits a whole vsync
+     * interval instead of being shown when it is ready -- which reads as
+     * stuttering plus occasional ~2x frame times.
+     *
+     * So when SkyLight is available, find the VRR-flagged mode that matches and
+     * apply it BY NUMBER.  Fall back to the old first-match behaviour when the
+     * private framework cannot be reached, exactly as before. */
+    double want_hz = hz;
+    int vrr_num = sky_vrr_mode_number(d, pw, ph, ptw, pth, want_hz);
+    if (vrr_num >= 0) {
+        CGDisplayConfigRef cfg;
+        if (CGBeginDisplayConfiguration(&cfg) == kCGErrorSuccess) {
+            /* first arg is the CONFIG REF, never a display id (segfault) */
+            pCGSConfigureDisplayMode(cfg, d, vrr_num);
+            if (CGCompleteDisplayConfiguration(cfg, kCGConfigureForSession)
+                    == kCGErrorSuccess) {
+                fprintf(stderr, "[mode-fixup] applied VRR mode %d for %zux%zu\n",
+                        vrr_num, ptw, pth);
+                return 0;
+            }
+        }
+        /* fall through to the public path if the SkyLight route failed */
+    }
+
     CFArrayRef modes = copy_all_modes(d);
     if (!modes) return 1;
     int rc = 1;
@@ -609,16 +675,56 @@ static int   g_name_alive = 0;
 
 static int game_name_alive(const char *exe) {
     if (!exe || !*exe) return 0;
+    /* Match the EXECUTABLE, not the whole command line.
+     *
+     * This used to be `pgrep -fi <exe>`, and -f matches argv in full -- which
+     * includes THIS helper's own argv, since the wrapper spawns it as
+     *     mode-fixup auto <server-pid> <lock> <game-pid> darksoulsiii.exe
+     * Excluding only our own pid was not enough: any sibling or leftover
+     * helper carrying the name made every other helper believe the game was
+     * running.  Launching Steam on its own was then enough to adopt a game
+     * that did not exist and switch the display to its resolution.
+     *
+     * `ps -axo command=` plus an explicit basename comparison keeps the match
+     * on the process's own image.  Wine reports WINDOWS paths
+     * (C:\...\DarkSoulsIII.exe), so compare the last path component of the
+     * FIRST argv token only, case-insensitively, and skip any line that is one
+     * of our own helpers. */
     char cmd[PATH_MAX];
-    snprintf(cmd, sizeof cmd, "pgrep -fi %s 2>/dev/null", exe);
+    snprintf(cmd, sizeof cmd, "ps -axo pid=,command= 2>/dev/null");
     FILE *p = popen(cmd, "r");
     if (!p) return 0;
-    char line[64];
+
+    size_t exelen = strlen(exe);
+    char line[2048];
     int alive = 0;
     pid_t me = getpid();
-    while (fgets(line, sizeof line, p)) {
-        pid_t n = (pid_t)atoi(line);
-        if (n > 0 && n != me) { alive = 1; break; }
+    while (!alive && fgets(line, sizeof line, p)) {
+        pid_t pid = 0;
+        char rest[1990] = {0};
+        if (sscanf(line, "%d %1989[^\n]", &pid, rest) != 2) continue;
+        if (pid <= 0 || pid == me) continue;
+        if (strstr(rest, "mode-fixup")) continue;      /* never match ourselves */
+
+        /* Find the exe name as a real PATH COMPONENT.
+         *
+         * Tokenising on whitespace does not work here: wine reports Windows
+         * paths and every Steam one has spaces in it --
+         *   C:\Program Files (x86)\Steam\steamapps\common\DARK SOULS III\Game\DarkSoulsIII.exe
+         * so the first whitespace-delimited token is "C:\Program".  Instead
+         * scan for the name and require it to be preceded by a path separator
+         * and followed by end-of-token.  That matches the real image and
+         * rejects a mention in someone's arguments (`grep -F DarkSoulsIII.exe`
+         * has a SPACE before the name, not a separator). */
+        for (const char *s = rest; (s = strcasestr(s, exe)) != NULL; s += 1) {
+            char before = (s == rest) ? '\0' : s[-1];
+            char after  = s[exelen];
+            if ((before == '\\' || before == '/') &&
+                (after == '\0' || after == ' ' || after == '\n')) {
+                alive = 1;
+                break;
+            }
+        }
     }
     pclose(p);
     return alive;
