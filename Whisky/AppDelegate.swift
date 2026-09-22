@@ -57,6 +57,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             try? await Task.sleep(for: .seconds(2))
             await self.sweepOrphanProcesses()
         }
+
+        // Game health monitoring: catch the two faults that leave a session in
+        // a bad state — a display left on a game's mode after it exits, and a
+        // game process that outlives its window. Started here so it is always
+        // running whenever games are launched from this app; there is nothing
+        // for the user to arm, and no separate context it could be missing from.
+        Task {
+            await GameHealthMonitor.shared.start()
+        }
     }
 
     /// The "Terminate Wine processes when Whisky closes" setting.
