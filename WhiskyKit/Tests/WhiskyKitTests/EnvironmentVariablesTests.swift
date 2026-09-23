@@ -753,4 +753,176 @@ final class EnvironmentVariablesTests: XCTestCase {
         let (resolved, _) = builder.resolve()
         XCTAssertEqual(resolved["CX_ACTIVE_GRAPHICS_BACKEND"], "d3dmetal")
     }
+
+    // MARK: - Variable Refresh Rate (declared frame-rate cadence)
+
+    func testDeclareFrameRateIsOffByDefault() {
+        let settings = BottleSettings()
+
+        XCTAssertFalse(settings.declareFrameRateRange)
+        XCTAssertEqual(settings.declaredFrameRate, 60)
+    }
+
+    func testDeclareFrameRateOffWritesNoVariables() {
+        var settings = BottleSettings()
+        // Pin the backend: a bare BottleSettings() is `.recommended`, which
+        // resolves per-machine, and this suite has to answer the same everywhere.
+        settings.graphicsBackend = .d3dMetal
+        settings.declareFrameRateRange = false
+        settings.declaredFrameRate = 60
+
+        var env: [String: String] = [:]
+        settings.environmentVariables(wineEnv: &env)
+
+        // Off must be indistinguishable from a bottle that predates the setting.
+        XCTAssertNil(env["WHISKY_DECLARE_FRAME_RATE_RANGE"])
+        XCTAssertNil(env["WHISKY_DECLARE_FRAME_RATE_PREFERRED"])
+    }
+
+    func testDeclareFrameRateOnWritesBothVariables() {
+        var settings = BottleSettings()
+        settings.graphicsBackend = .d3dMetal
+        settings.declareFrameRateRange = true
+        settings.declaredFrameRate = 60
+
+        var env: [String: String] = [:]
+        settings.environmentVariables(wineEnv: &env)
+
+        XCTAssertEqual(env["WHISKY_DECLARE_FRAME_RATE_RANGE"], "1")
+        XCTAssertEqual(env["WHISKY_DECLARE_FRAME_RATE_PREFERRED"], "60")
+    }
+
+    func testDeclareFrameRateCarriesAnArbitraryRate() {
+        var settings = BottleSettings()
+        settings.graphicsBackend = .d3dMetal
+        settings.declareFrameRateRange = true
+        settings.declaredFrameRate = 30
+
+        var env: [String: String] = [:]
+        settings.environmentVariables(wineEnv: &env)
+
+        XCTAssertEqual(env["WHISKY_DECLARE_FRAME_RATE_PREFERRED"], "30")
+    }
+
+    func testDeclareFrameRateZeroOmitsOnlyThePreferredValue() {
+        var settings = BottleSettings()
+        settings.graphicsBackend = .d3dMetal
+        settings.declareFrameRateRange = true
+        settings.declaredFrameRate = 0
+
+        var env: [String: String] = [:]
+        settings.environmentVariables(wineEnv: &env)
+
+        // Range stays on; a preferred of 0 means "let the driver use the
+        // display's own minimum", which is expressed by omitting the value.
+        XCTAssertEqual(env["WHISKY_DECLARE_FRAME_RATE_RANGE"], "1")
+        XCTAssertNil(env["WHISKY_DECLARE_FRAME_RATE_PREFERRED"])
+    }
+
+    func testDeclareFrameRateSurvivesTheRoundTripThroughDisk() throws {
+        // The setting is per-bottle and read back from Metadata.plist on every
+        // launch, so it has to survive encode/decode. The backend is pinned so
+        // the env assertion below does not depend on this machine's resolution
+        // of `.recommended`.
+        var settings = BottleSettings()
+        settings.graphicsBackend = .d3dMetal
+        settings.declareFrameRateRange = true
+        settings.declaredFrameRate = 45
+
+        let url = FileManager.default.temporaryDirectory
+            .appending(path: "vrr-\(UUID().uuidString).plist")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try settings.encode(to: url)
+        let decoded = try BottleSettings.decode(from: url)
+
+        XCTAssertTrue(decoded.declareFrameRateRange)
+        XCTAssertEqual(decoded.declaredFrameRate, 45)
+
+        var env: [String: String] = [:]
+        decoded.environmentVariables(wineEnv: &env)
+        XCTAssertEqual(env["WHISKY_DECLARE_FRAME_RATE_PREFERRED"], "45")
+    }
+
+    func testBottlePredatingTheSettingDecodesItAsOff() throws {
+        // A bottle written before the key existed must not switch it on: the
+        // setting changes display timing.
+        let url = FileManager.default.temporaryDirectory
+            .appending(path: "vrr-old-\(UUID().uuidString).plist")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        var settings = BottleSettings()
+        settings.declareFrameRateRange = false
+        try settings.encode(to: url)
+
+        // Strip the keys, simulating a file written by an older build.
+        let data = try Data(contentsOf: url)
+        var plist = try PropertyListSerialization.propertyList(
+            from: data, options: [], format: nil) as? [String: Any] ?? [:]
+        if var metal = plist["metalConfig"] as? [String: Any] {
+            metal.removeValue(forKey: "declareFrameRateRange")
+            metal.removeValue(forKey: "declaredFrameRate")
+            plist["metalConfig"] = metal
+        }
+        let stripped = try PropertyListSerialization.data(
+            fromPropertyList: plist, format: .xml, options: 0)
+        try stripped.write(to: url)
+
+        let decoded = try BottleSettings.decode(from: url)
+
+        XCTAssertFalse(decoded.declareFrameRateRange)
+        XCTAssertEqual(decoded.declaredFrameRate, 60)
+    }
+
+    /// The whole point of the change: the cadence declaration is a *display*
+    /// concern (winemac.drv), not a renderer concern, so it must be emitted for
+    /// every backend and not only from the `.d3dMetal` switch arm. A DXVK game
+    /// has exactly the same inability to declare its frame-rate cadence.
+    func testDeclareFrameRateIsWrittenForANonD3DMetalBackend() {
+        var settings = BottleSettings()
+        settings.graphicsBackend = .dxvk
+        settings.declareFrameRateRange = true
+        settings.declaredFrameRate = 60
+
+        var env: [String: String] = [:]
+        settings.environmentVariables(wineEnv: &env)
+
+        XCTAssertEqual(env["WHISKY_DECLARE_FRAME_RATE_RANGE"], "1")
+        XCTAssertEqual(env["WHISKY_DECLARE_FRAME_RATE_PREFERRED"], "60")
+    }
+
+    /// The same, across every backend rather than one example, so a future
+    /// backend added to the switch cannot silently lose the block again.
+    func testDeclareFrameRateIsWrittenForEveryBackend() {
+        for backend in [GraphicsBackend.d3dMetal, .dxvk, .dxmt, .wined3d] {
+            var settings = BottleSettings()
+            settings.graphicsBackend = backend
+            settings.declareFrameRateRange = true
+            settings.declaredFrameRate = 60
+
+            var env: [String: String] = [:]
+            settings.environmentVariables(wineEnv: &env)
+
+            XCTAssertEqual(env["WHISKY_DECLARE_FRAME_RATE_RANGE"], "1",
+                           "missing RANGE for backend \(backend.rawValue)")
+            XCTAssertEqual(env["WHISKY_DECLARE_FRAME_RATE_PREFERRED"], "60",
+                           "missing PREFERRED for backend \(backend.rawValue)")
+        }
+    }
+
+    /// `.recommended` resolves per-machine, so the resolution is pinned here; a
+    /// DXVK resolution must still carry the declaration.
+    func testDeclareFrameRateIsWrittenWhenRecommendedResolvesToDXVK() {
+        var settings = BottleSettings()
+        settings.graphicsBackend = .recommended
+        settings.declareFrameRateRange = true
+        settings.declaredFrameRate = 60
+
+        var builder = EnvironmentBuilder()
+        _ = settings.populateBottleManagedLayer(builder: &builder, resolvedBackend: .dxvk)
+
+        let (resolved, _) = builder.resolve()
+        XCTAssertEqual(resolved["WHISKY_DECLARE_FRAME_RATE_RANGE"], "1")
+        XCTAssertEqual(resolved["WHISKY_DECLARE_FRAME_RATE_PREFERRED"], "60")
+    }
 }

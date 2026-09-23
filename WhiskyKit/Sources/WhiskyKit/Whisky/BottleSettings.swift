@@ -901,6 +901,33 @@ public struct BottleSettings: Codable, Equatable {
             graphicsBackend
         }
 
+        // Declare the game's frame-rate cadence so the display can follow it
+        // with variable refresh.
+        //
+        // macOS only lowers a display's refresh rate when an app declares a
+        // cadence; a Windows game cannot declare one, and Wine's presentation
+        // path has nothing to carry a declaration, so without this the panel
+        // holds its maximum rate and a game running below its cap gets frames
+        // spaced on uneven hold counts.
+        //
+        // This is a *display* concern (winemac.drv), not a renderer one: a
+        // DXVK/DXMT/wined3d title presenting through winemac.drv has exactly
+        // the same inability to declare its cadence as a D3DMetal one, so the
+        // block is emitted for every backend rather than from a switch arm.
+        //
+        // The two variables are read by winemac.drv (see
+        // macdrv_declare_frame_rate_range). Only `PREFERRED` lowers the
+        // rate -- the driver reads the display's own min/max from the
+        // IORegistry for the range -- so a game's cadence is the one value
+        // that has to be supplied.
+        if declareFrameRateRange {
+            builder.set("WHISKY_DECLARE_FRAME_RATE_RANGE", "1", layer: .bottleManaged)
+            if declaredFrameRate > 0 {
+                builder.set("WHISKY_DECLARE_FRAME_RATE_PREFERRED",
+                            String(declaredFrameRate), layer: .bottleManaged)
+            }
+        }
+
         // Backend-conditional env vars and DLL overrides
         switch resolvedBackend {
         case .d3dMetal, .recommended:
@@ -925,28 +952,6 @@ public struct BottleSettings: Codable, Equatable {
             // the variable is inert rather than harmful everywhere else.
             if metal4Enabled {
                 builder.set("D3DM_MTL4", "1", layer: .bottleManaged)
-            }
-
-            // Declare the game's frame-rate cadence so the display can follow
-            // it with variable refresh.
-            //
-            // macOS only lowers a display's refresh rate when an app declares a
-            // cadence; a Windows game cannot declare one, and Wine's D3DMetal
-            // presentation path has nothing to carry a declaration, so without
-            // this the panel holds its maximum rate and a game running below
-            // its cap gets frames spaced on uneven hold counts.
-            //
-            // The two variables are read by winemac.drv (see
-            // macdrv_declare_frame_rate_range). Only `PREFERRED` lowers the
-            // rate -- the driver reads the display's own min/max from the
-            // IORegistry for the range -- so a game's cadence is the one value
-            // that has to be supplied.
-            if declareFrameRateRange {
-                builder.set("WHISKY_DECLARE_FRAME_RATE_RANGE", "1", layer: .bottleManaged)
-                if declaredFrameRate > 0 {
-                    builder.set("WHISKY_DECLARE_FRAME_RATE_PREFERRED",
-                                String(declaredFrameRate), layer: .bottleManaged)
-                }
             }
 
         case .dxvk:
