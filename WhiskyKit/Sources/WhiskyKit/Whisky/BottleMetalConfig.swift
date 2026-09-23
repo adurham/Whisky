@@ -27,6 +27,24 @@ public struct BottleMetalConfig: Codable, Equatable {
     var sequoiaCompatMode: Bool = true // Enable Sequoia compatibility by default
     var metal4Enabled: Bool = true // Metal 4 command encoding, D3DMetal ignores it on older systems
 
+    /// Declare the game's frame-rate cadence to macOS so the display can follow
+    /// it with variable refresh, instead of holding a fixed rate and spacing
+    /// frames on uneven hold counts.
+    ///
+    /// Off by default because it changes display timing and the mechanism does
+    /// not work on every display.
+    var declareFrameRateRange: Bool = false
+
+    /// The cadence to declare, in Hz.
+    ///
+    /// macOS takes a `CAFrameRateRange` as `clamp(preferred, min, max)` and
+    /// treats a preferred of 0 as "use the maximum", so ONLY this value can
+    /// lower the display's rate -- declaring the display's own range at the top
+    /// of itself is identical to declaring nothing. Set it to the game's frame
+    /// rate: 60 for a 60fps-capped title, 30 for a 30fps one, 0 to let the
+    /// driver pick the display's minimum.
+    var declaredFrameRate: Int = 60
+
     public init() {}
 
     public init(from decoder: Decoder) throws {
@@ -40,5 +58,11 @@ public struct BottleMetalConfig: Codable, Equatable {
         // Defaults to true for bottles written before this key existed, so an
         // upgrade turns it on rather than silently leaving it off.
         self.metal4Enabled = try container.decodeIfPresent(Bool.self, forKey: .metal4Enabled) ?? true
+        // Off for bottles written before this key existed: it changes display
+        // timing, so an upgrade must not switch it on by itself.
+        self.declareFrameRateRange = try container.decodeIfPresent(
+            Bool.self, forKey: .declareFrameRateRange) ?? false
+        self.declaredFrameRate = try container.decodeIfPresent(
+            Int.self, forKey: .declaredFrameRate) ?? 60
     }
 }

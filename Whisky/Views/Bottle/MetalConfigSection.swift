@@ -51,6 +51,29 @@ struct MetalConfigSection: View {
                         .foregroundColor(.secondary)
                 }
             }
+
+            // Declare the game's frame-rate cadence so the display follows it
+            // with variable refresh. The rate field only matters when the
+            // toggle is on, so it is shown only then.
+            Toggle(isOn: $bottle.settings.declareFrameRateRange) {
+                VStack(alignment: .leading) {
+                    Text("config.declareFrameRate")
+                    Text("config.declareFrameRate.info")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            if bottle.settings.declareFrameRateRange {
+                HStack {
+                    Text("config.declaredFrameRate")
+                    Spacer()
+                    TextField("", value: $bottle.settings.declaredFrameRate, format: .number)
+                        .frame(width: 60)
+                        .multilineTextAlignment(.trailing)
+                    Text("Hz")
+                        .foregroundColor(.secondary)
+                }
+            }
         }
     }
 }

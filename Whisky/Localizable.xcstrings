@@ -60589,6 +60589,40 @@
         }
       }
     },
+    "config.declareFrameRate" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Variable Refresh Rate"
+          }
+        }
+      },
+      "comment" : "Bottle setting: declare the game's frame-rate cadence so the display can follow it with variable refresh."
+    },
+    "config.declareFrameRate.info" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tells the display the game's frame rate so it can follow it, instead of holding a fixed refresh rate. Helps games that run below their frame-rate cap. Requires a VRR-capable display."
+          }
+        }
+      }
+    },
+    "config.declaredFrameRate" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Frame rate"
+          }
+        }
+      }
+    },
     "config.disableControllerMapping" : {
       "localizations" : {
         "en" : {
