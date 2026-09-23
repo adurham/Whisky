@@ -186,8 +186,8 @@ public actor GameHealthMonitor {
             return
         }
         logger.notice("restoring display to mode \(target)")
-        let ok = await config.restoreDisplay(target)
-        logger.notice("display restore \(ok ? "succeeded" : "FAILED", privacy: .public)")
+        let restored = await config.restoreDisplay(target)
+        logger.notice("display restore \(restored ? "succeeded" : "FAILED", privacy: .public)")
 
         // Verify by re-reading rather than trusting the call's return value.
         try? await Task.sleep(for: .seconds(2))
@@ -304,20 +304,28 @@ public actor GameHealthMonitor {
 
     /// Density is read from the mode description. A density of 2.0 means a
     /// scaled HiDPI mode, which is what the desktop runs.
+    ///
+    /// The offset is VERIFIED, not assumed: on this machine the description
+    /// for the live scaled mode carries 2.0 at 0xD0. Reading 0xD8 instead
+    /// (four bytes past it) returned 0.0, which made this check call the
+    /// healthy desktop "non-HiDPI" and fire a false fault seconds after
+    /// launch — and because it never passed its own test, no healthy mode was
+    /// ever recorded, so the repair had nothing to restore to either.
+    /// Layout: mode, flags, width, height, depth, 170 reserved, freq,
+    /// 16 more, then the density float at 0xD0.
     private nonisolated func isHiDPIMode(_ modeNumber: Int32) -> Bool {
         guard let handle = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY),
               let symbol = dlsym(handle, "CGSGetDisplayModeDescriptionOfLength") else { return false }
         typealias GetDesc = @convention(c) (CGDirectDisplayID, Int32, UnsafeMutableRawPointer, Int32) -> Int32
         let getDesc = unsafeBitCast(symbol, to: GetDesc.self)
 
-        // Layout: mode, flags, width, height, depth, 170 reserved, freq,
-        // 16 more, density (float). Only density and the mode number are used.
         var storage = [UInt8](repeating: 0, count: 0xDC)
-        let rc = storage.withUnsafeMutableBytes { buffer in
-            getDesc(CGMainDisplayID(), modeNumber, buffer.baseAddress!, 0xDC)
+        let result = storage.withUnsafeMutableBytes { buffer -> Int32 in
+            guard let base = buffer.baseAddress else { return -1 }
+            return getDesc(CGMainDisplayID(), modeNumber, base, 0xDC)
         }
-        guard rc == 0 else { return false }
-        let density = storage.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 0xD8, as: Float.self) }
+        guard result == 0 else { return false }
+        let density = storage.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 0xD0, as: Float.self) }
         return density >= 1.9
     }
 

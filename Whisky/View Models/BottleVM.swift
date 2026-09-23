@@ -101,19 +101,7 @@ final class BottleVM: ObservableObject {
         // conflicting actions during move/export/duplicate.
         let inFlight = Dictionary(bottles.filter(\.inFlight).map { ($0.url, $0) }) { first, _ in first }
         bottles = bottlesList.loadBottles().map { inFlight[$0.url] ?? $0 }
-
-        // Tell the health monitor which executables are games, so it can tell a
-        // running game from an orphan after the fact. Only this layer knows the
-        // bottles and their programs.
-        Task { @MainActor in
-            var names: Set<String> = []
-            for bottle in bottles {
-                for program in bottle.programs {
-                    names.insert(program.url.lastPathComponent)
-                }
-            }
-            await GameHealthMonitor.shared.registerGames(imageNames: names)
-        }
+        GameHealthMonitor.registerPrograms(in: bottles)
     }
 
     /// Bottles found on disk with no registry entry, awaiting a re-import

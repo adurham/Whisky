@@ -100,3 +100,23 @@ extension GameHealthMonitor.Configuration {
     }
 }
 
+extension GameHealthMonitor {
+    /// Registers the executables of the given bottles as games to watch.
+    ///
+    /// Lives here rather than at the call site so the app layer needs no
+    /// knowledge of how names are normalised or merged. MainActor-bound:
+    /// `Bottle` is main-actor isolated, so its programs can only be read there.
+    @MainActor
+    public static func registerPrograms(in bottles: [Bottle]) {
+        var names: Set<String> = []
+        for bottle in bottles {
+            for program in bottle.programs {
+                names.insert(program.url.lastPathComponent)
+            }
+        }
+        guard !names.isEmpty else { return }
+        Task {
+            await GameHealthMonitor.shared.registerGames(imageNames: names)
+        }
+    }
+}
