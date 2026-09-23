@@ -152,6 +152,28 @@ public actor GameHealthMonitor {
     private func checkDisplayRestored() async {
         guard let modeNumber = currentModeNumber() else { return }
 
+        /* REFUSE TO GUESS WITH AN EMPTY GAME LIST.
+         *
+         * The monitor decides "no game is running, so the desktop should be
+         * restored" by checking the games it was told about. If that list is
+         * empty -- which happens when the app's libraries have not loaded yet,
+         * or the registration path failed -- then "no game running" is true
+         * while a game is in fact running, and this restores the display
+         * DURING gameplay.
+         *
+         * Measured consequence: the monitor set the display mode mid-session
+         * twice in one playthrough (19:44:59 and 19:59:03). Every mode set
+         * re-initialises the display link, which DROPS variable refresh. That
+         * is the "VRR works for a second then reverts to locked 240Hz" the
+         * user reported -- caused by this monitor, not by the game.
+         *
+         * An empty list is not evidence that nothing is running; it is
+         * evidence that this monitor does not know what to look for. */
+        guard !config.gameImageNames.isEmpty else {
+            displayFaultSamples = 0
+            return
+        }
+
         // A density-2.0 mode is the scaled HiDPI desktop. Checking density
         // alone is NOT sufficient — two different mode numbers can both be
         // density 2.0 — so remember the specific number seen while healthy and
@@ -291,43 +313,10 @@ public actor GameHealthMonitor {
     }
 
     // MARK: - Display inspection
-
-    private nonisolated func currentModeNumber() -> Int32? {
-        guard let handle = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY),
-              let symbol = dlsym(handle, "CGSGetCurrentDisplayMode") else { return nil }
-        typealias GetMode = @convention(c) (CGDirectDisplayID, UnsafeMutablePointer<Int32>) -> Int32
-        let getMode = unsafeBitCast(symbol, to: GetMode.self)
-        var mode: Int32 = -1
-        _ = getMode(CGMainDisplayID(), &mode)
-        return mode >= 0 ? mode : nil
-    }
-
-    /// Density is read from the mode description. A density of 2.0 means a
-    /// scaled HiDPI mode, which is what the desktop runs.
-    ///
-    /// The offset is VERIFIED, not assumed: on this machine the description
-    /// for the live scaled mode carries 2.0 at 0xD0. Reading 0xD8 instead
-    /// (four bytes past it) returned 0.0, which made this check call the
-    /// healthy desktop "non-HiDPI" and fire a false fault seconds after
-    /// launch — and because it never passed its own test, no healthy mode was
-    /// ever recorded, so the repair had nothing to restore to either.
-    /// Layout: mode, flags, width, height, depth, 170 reserved, freq,
-    /// 16 more, then the density float at 0xD0.
-    private nonisolated func isHiDPIMode(_ modeNumber: Int32) -> Bool {
-        guard let handle = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY),
-              let symbol = dlsym(handle, "CGSGetDisplayModeDescriptionOfLength") else { return false }
-        typealias GetDesc = @convention(c) (CGDirectDisplayID, Int32, UnsafeMutableRawPointer, Int32) -> Int32
-        let getDesc = unsafeBitCast(symbol, to: GetDesc.self)
-
-        var storage = [UInt8](repeating: 0, count: 0xDC)
-        let result = storage.withUnsafeMutableBytes { buffer -> Int32 in
-            guard let base = buffer.baseAddress else { return -1 }
-            return getDesc(CGMainDisplayID(), modeNumber, base, 0xDC)
-        }
-        guard result == 0 else { return false }
-        let density = storage.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 0xD0, as: Float.self) }
-        return density >= 1.9
-    }
+    //
+    // These read SkyLight and CoreGraphics directly; they live in
+    // GameHealthMonitor+Display.swift to keep this file focused on the
+    // polling logic and within the project's file-length limit.
 
     // MARK: - Evidence
 

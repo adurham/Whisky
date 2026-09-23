@@ -158,6 +158,16 @@ struct ContentView: View {
             )
         }
         .onChange(of: selected) { oldValue, _ in
+            // Selecting a bottle is when its games become known to the health
+            // monitor. The monitor needs the game executable names to tell a
+            // running game from an orphan; with an empty list it would conclude
+            // "nothing is running" and restore the display DURING gameplay,
+            // which drops variable refresh.
+            if let url = selected,
+               let bottle = bottleVM.bottles.first(where: { $0.url == url }) {
+                Task { await bottle.updateInstalledPrograms() }
+            }
+
             // Check if previous bottle had running processes
             guard let oldURL = oldValue,
                   let oldBottle = bottleVM.bottles.first(where: { $0.url == oldURL })

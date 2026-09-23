@@ -219,6 +219,15 @@ extension Bottle {
             }
 
             self.programs = programs.sorted { $0.name.lowercased() < $1.name.lowercased() }
+
+            // Tell the health monitor which executables are games, so it can
+            // tell a running game from an orphan. This is the point where the
+            // list actually becomes known: `programs` starts empty and is only
+            // filled here, so registering anywhere earlier (or assuming the
+            // list exists) leaves the monitor with an empty game list -- and a
+            // monitor that knows no games decides "nothing is running" and
+            // restores the display DURING gameplay, which drops VRR.
+            GameHealthMonitor.registerPrograms(in: [self])
         }
     }
 
