@@ -367,6 +367,20 @@ extension Wine {
         if let dllOverrides = overrides.dllOverrides {
             dllResolver.programCustom.append(contentsOf: dllOverrides)
         }
+
+        // Per-program refresh-rate cap. The wine exec wrapper in the engine
+        // reads WHISKY_MAX_REFRESH_HZ from the environment of the process that
+        // becomes the game and hands it to mode-fixup, which pins the display
+        // to the highest real mode rate at or below the cap for the game's
+        // lifetime; with the variable absent the wrapper's default `auto`
+        // applies and behaviour is unchanged. Only an explicit cap is written,
+        // so inheriting leaves the key absent rather than writing an empty one.
+        if let refreshRateCap = overrides.refreshRateCap, refreshRateCap > 0 {
+            builder.set(
+                "WHISKY_MAX_REFRESH_HZ", String(refreshRateCap), layer: .programUser,
+                reason: "Per-program refresh-rate cap"
+            )
+        }
     }
 
     /// Logs a safe launch summary at info level.

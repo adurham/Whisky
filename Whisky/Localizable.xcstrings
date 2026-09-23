@@ -61333,6 +61333,40 @@
         }
       }
     },
+    "program.overrides.refreshRate" : {
+      "comment" : "Program override: hold the physical display at or below this refresh rate while this program runs.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Refresh Rate Cap"
+          }
+        }
+      }
+    },
+    "program.overrides.refreshRate.info" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Holds the display at the highest supported rate at or below this value while this program runs. A real display mode with a fixed timing is used, so it also works on displays where the variable refresh rate cannot be steered from the game."
+          }
+        }
+      }
+    },
+    "program.overrides.refreshRate.inherited" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Not capped \u2014 follows the bottle and the display's own rate"
+          }
+        }
+      }
+    },
     "program.overrides.reset" : {
       "localizations" : {
         "en" : {

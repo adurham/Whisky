@@ -650,6 +650,114 @@ final class EnvironmentVariablesTests: XCTestCase {
         XCTAssertEqual(decoded.metal4Enabled, false)
     }
 
+    // MARK: - Per-program refresh-rate cap
+
+    /// The wrapper reads WHISKY_MAX_REFRESH_HZ out of the game process's
+    /// environment and hands it to mode-fixup as the cap, so with cap=60 at
+    /// 2560x1440 the helper holds a real 60.0Hz mode. The cap has to be
+    /// per-program, and the variable has to be absent (not empty) when the
+    /// program does not set one -- absent is what makes the wrapper fall back
+    /// to `auto` and leave the display alone the way it did before this
+    /// setting existed.
+    func testRefreshRateCapReachesTheWrapperVariable() {
+        var settings = BottleSettings()
+        settings.graphicsBackend = .d3dMetal
+
+        var overrides = ProgramOverrides()
+        overrides.refreshRateCap = 60
+
+        let env = resolvedEnvironment(bottleSettings: settings, programOverrides: overrides)
+
+        XCTAssertEqual(env["WHISKY_MAX_REFRESH_HZ"], "60")
+    }
+
+    func testRefreshRateCapUnsetLeavesTheVariableAbsent() {
+        var settings = BottleSettings()
+        settings.graphicsBackend = .d3dMetal
+
+        // No cap: the program inherits, so the variable must not be written at
+        // all. An empty value would be a different thing to the wrapper -- it
+        // would disable the resolution hold entirely.
+        let env = resolvedEnvironment(bottleSettings: settings, programOverrides: ProgramOverrides())
+
+        XCTAssertNil(env["WHISKY_MAX_REFRESH_HZ"])
+    }
+
+    func testRefreshRateCapCarriesAnArbitraryRate() {
+        var settings = BottleSettings()
+        settings.graphicsBackend = .d3dMetal
+
+        var overrides = ProgramOverrides()
+        overrides.refreshRateCap = 144
+
+        let env = resolvedEnvironment(bottleSettings: settings, programOverrides: overrides)
+
+        XCTAssertEqual(env["WHISKY_MAX_REFRESH_HZ"], "144")
+    }
+
+    /// Two programs in one bottle must not fight: the cap is a per-program
+    /// field, so a program without one resolves without it even in the same
+    /// session as one that has a cap.
+    func testRefreshRateCapIsPerProgramNotPerBottle() {
+        var settings = BottleSettings()
+        settings.graphicsBackend = .d3dMetal
+
+        var capped = ProgramOverrides()
+        capped.refreshRateCap = 60
+
+        XCTAssertEqual(
+            resolvedEnvironment(bottleSettings: settings, programOverrides: capped)["WHISKY_MAX_REFRESH_HZ"],
+            "60"
+        )
+        XCTAssertNil(
+            resolvedEnvironment(bottleSettings: settings, programOverrides: ProgramOverrides())[
+                "WHISKY_MAX_REFRESH_HZ"
+            ]
+        )
+    }
+
+    /// A zero or negative cap is not a cap: `atof` would turn it into a mode
+    /// search that can never match, which silently disables the display hold.
+    /// Treat it as unset and inherit.
+    func testNonPositiveRefreshRateCapIsTreatedAsUnset() {
+        for cap in [0, -1] {
+            var settings = BottleSettings()
+            settings.graphicsBackend = .d3dMetal
+
+            var overrides = ProgramOverrides()
+            overrides.refreshRateCap = cap
+
+            let env = resolvedEnvironment(bottleSettings: settings, programOverrides: overrides)
+
+            XCTAssertNil(env["WHISKY_MAX_REFRESH_HZ"], "cap \(cap) must not be written")
+        }
+    }
+
+    func testRefreshRateCapOverridesNothingElseInTheEnvironment() {
+        // The cap rides the programUser layer alongside the other graphics
+        // overrides; it must not disturb the backend's own variables.
+        var settings = BottleSettings()
+        settings.graphicsBackend = .d3dMetal
+
+        var overrides = ProgramOverrides()
+        overrides.refreshRateCap = 60
+
+        let env = resolvedEnvironment(bottleSettings: settings, programOverrides: overrides)
+
+        XCTAssertEqual(env["WHISKY_MAX_REFRESH_HZ"], "60")
+        XCTAssertEqual(env["D3DM_MTL4"], "1")
+    }
+
+    func testRefreshRateCapOverrideSurvivesASettingsRoundTrip() throws {
+        var overrides = ProgramOverrides()
+        overrides.refreshRateCap = 60
+
+        let data = try PropertyListEncoder().encode(overrides)
+        let decoded = try PropertyListDecoder().decode(ProgramOverrides.self, from: data)
+
+        XCTAssertEqual(decoded.refreshRateCap, 60)
+    }
+
     /// Resolves the environment a program launch actually sees: the bottle-managed
     /// layer with the program override applied on top.
     private func resolvedEnvironment(

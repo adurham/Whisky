@@ -48,6 +48,7 @@ struct ProgramOverrideSettingsView: View {
             performanceGroup
             inputGroup
             displayGroup
+            refreshRateGroup
             dllOverridesGroup
             winetricksSection
             resetButton
@@ -458,6 +459,48 @@ struct ProgramOverrideSettingsView: View {
             .foregroundStyle(.secondary)
     }
 
+    // MARK: - Refresh Rate Group
+
+    /// The display-mode refresh cap for this program.
+    ///
+    /// Separate from ``displayGroup`` on purpose: that group is Wine's virtual
+    /// desktop, which decides the resolution a program renders at, while this is
+    /// the refresh rate the physical display is held at while the program runs.
+    /// They are independent, so neither may gate the other.
+    private var refreshRateGroup: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle(
+                "program.overrides.refreshRate",
+                isOn: refreshRateOverrideBinding
+            )
+            if hasRefreshRateOverride {
+                HStack {
+                    TextField(
+                        "60",
+                        value: refreshRateCapBinding,
+                        format: .number
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 60)
+                    .multilineTextAlignment(.trailing)
+                    Text("Hz")
+                        .foregroundStyle(.secondary)
+                    Stepper(
+                        "program.overrides.refreshRate",
+                        value: refreshRateCapBinding,
+                        in: 24...500
+                    )
+                    .labelsHidden()
+                }
+                Text("program.overrides.refreshRate.info")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                inheritedSummary(String(localized: "program.overrides.refreshRate.inherited"))
+            }
+        }
+    }
+
     // MARK: - DLL Overrides Group
 
     private var dllOverridesGroup: some View {
@@ -591,6 +634,10 @@ struct ProgramOverrideSettingsView: View {
 
     private var hasDLLOverride: Bool {
         program.settings.overrides?.dllOverrides != nil
+    }
+
+    private var hasRefreshRateOverride: Bool {
+        program.settings.overrides?.refreshRateCap != nil
     }
 
     private var installedVerbs: [String] {
@@ -738,6 +785,23 @@ struct ProgramOverrideSettingsView: View {
         )
     }
 
+    /// On seeds a concrete starting cap; off clears the field entirely, so the
+    /// program goes back to inheriting (the variable is absent and the wrapper's
+    /// `auto` default applies).
+    private var refreshRateOverrideBinding: Binding<Bool> {
+        Binding(
+            get: { hasRefreshRateOverride },
+            set: { isOn in
+                ensureOverrides()
+                if isOn {
+                    program.settings.overrides?.refreshRateCap = Self.defaultRefreshRateCap
+                } else {
+                    program.settings.overrides?.refreshRateCap = nil
+                }
+            }
+        )
+    }
+
     // MARK: - Individual Setting Bindings
 
     private var graphicsBackendBinding: Binding<GraphicsBackend> {
@@ -859,6 +923,15 @@ struct ProgramOverrideSettingsView: View {
         )
     }
 
+    /// Clamped to a range a real display mode can hold, following the
+    /// custom-resolution bindings' clamp-on-set idiom.
+    private var refreshRateCapBinding: Binding<Int> {
+        Binding(
+            get: { program.settings.overrides?.refreshRateCap ?? Self.defaultRefreshRateCap },
+            set: { program.settings.overrides?.refreshRateCap = min(max($0, 24), 500) }
+        )
+    }
+
     private var programDLLOverridesBinding: Binding<[DLLOverrideEntry]> {
         Binding(
             get: { program.settings.overrides?.dllOverrides ?? [] },
@@ -888,6 +961,10 @@ struct ProgramOverrideSettingsView: View {
     }
 
     // MARK: - Helpers
+
+    /// The cap a newly-enabled refresh-rate override starts at. 60 is the
+    /// common target for a title capped in its own settings.
+    private static let defaultRefreshRateCap = 60
 
     private func ensureOverrides() {
         if program.settings.overrides == nil {

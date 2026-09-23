@@ -90,6 +90,14 @@ public struct ProgramOverrides: Codable, Equatable, Sendable {
     public var customResolutionWidth: Int?
     /// The custom virtual desktop height in pixels. `nil` inherits from bottle.
     public var customResolutionHeight: Int?
+    /// The refresh-rate cap for this program in Hz. `nil` inherits from bottle.
+    ///
+    /// Bottle-level inheritance here means "no cap declared": the launch wrapper
+    /// leaves `WHISKY_MAX_REFRESH_HZ` unset and the mode-fixup helper falls back
+    /// to `auto`, which caps the display at the desktop's own refresh rate. A
+    /// number pins the display to the highest real mode rate at or below it for
+    /// the lifetime of this program.
+    public var refreshRateCap: Int?
 
     // MARK: - DLL Overrides
 
@@ -128,6 +136,7 @@ public struct ProgramOverrides: Codable, Equatable, Sendable {
             && resolutionPreset == nil
             && customResolutionWidth == nil
             && customResolutionHeight == nil
+            && refreshRateCap == nil
             && dllOverrides == nil
     }
 
@@ -156,6 +165,7 @@ public struct ProgramOverrides: Codable, Equatable, Sendable {
         self.resolutionPreset = container.decodeLenientIfPresent(ResolutionPreset.self, forKey: .resolutionPreset)
         self.customResolutionWidth = try container.decodeIfPresent(Int.self, forKey: .customResolutionWidth)
         self.customResolutionHeight = try container.decodeIfPresent(Int.self, forKey: .customResolutionHeight)
+        self.refreshRateCap = try container.decodeIfPresent(Int.self, forKey: .refreshRateCap)
         self.dllOverrides = try container.decodeIfPresent([DLLOverrideEntry].self, forKey: .dllOverrides)
         self.taggedVerbs = try container.decodeIfPresent([String].self, forKey: .taggedVerbs)
     }

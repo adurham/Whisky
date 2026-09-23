@@ -33,6 +33,35 @@ final class ProgramOverridesTests: XCTestCase {
         XCTAssertFalse(overrides.isEmpty)
     }
 
+    func testRefreshRateCapAloneIsNotEmpty() {
+        var overrides = ProgramOverrides()
+        overrides.refreshRateCap = 60
+        XCTAssertFalse(overrides.isEmpty)
+    }
+
+    /// A plist written before this field existed must keep decoding, and the
+    /// new field must come back nil (inherit) rather than defaulting to a
+    /// number that would cap every program the user never capped.
+    func testOverridesWithoutRefreshRateCapKeyDecodeNil() throws {
+        var overrides = ProgramOverrides()
+        overrides.enhancedSync = .msync
+        overrides.taggedVerbs = ["vcrun2022"]
+
+        let encoder = PropertyListEncoder()
+        encoder.outputFormat = .xml
+        let data = try encoder.encode(overrides)
+
+        let xml = try XCTUnwrap(String(data: data, encoding: .utf8))
+        XCTAssertFalse(
+            xml.contains("refreshRateCap"),
+            "an unset cap must not be encoded at all; the key's presence is what inheritance keys off"
+        )
+
+        let decoded = try PropertyListDecoder().decode(ProgramOverrides.self, from: Data(xml.utf8))
+        XCTAssertNil(decoded.refreshRateCap)
+        XCTAssertEqual(decoded.enhancedSync, .msync)
+    }
+
     // MARK: - Codable Round-Trip
 
     func testCodableRoundTripAllNil() throws {
