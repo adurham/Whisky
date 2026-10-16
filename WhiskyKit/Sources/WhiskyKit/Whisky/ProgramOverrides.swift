@@ -128,7 +128,6 @@ public struct ProgramOverrides: Codable, Equatable, Sendable {
             && enhancedSync == nil
             && metal4Enabled == nil
             && metalHud == nil
-            && performancePreset == nil
             && shaderCacheEnabled == nil
             && controllerCompatibilityMode == nil
             && disableHIDAPI == nil
@@ -155,7 +154,6 @@ public struct ProgramOverrides: Codable, Equatable, Sendable {
         self.enhancedSync = try container.decodeIfPresent(EnhancedSync.self, forKey: .enhancedSync)
         self.metal4Enabled = try container.decodeIfPresent(Bool.self, forKey: .metal4Enabled)
         self.metalHud = try container.decodeIfPresent(Bool.self, forKey: .metalHud)
-        self.performancePreset = container.decodeLenientIfPresent(PerformancePreset.self, forKey: .performancePreset)
         self.shaderCacheEnabled = try container.decodeIfPresent(Bool.self, forKey: .shaderCacheEnabled)
         self.controllerCompatibilityMode = try container.decodeIfPresent(
             Bool.self, forKey: .controllerCompatibilityMode
