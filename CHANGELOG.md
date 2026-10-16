@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- The Metal HUD can now be set per program. The bottle setting reaches every
+  process in the prefix, so turning it on to measure a game also drew the HUD
+  over the launcher's own windows, which the player is still clicking around
+  in. A program-level value keeps it on the title being measured; leaving it
+  unset inherits the bottle as before.
+
 ### Fixed
 - A launch no longer rewrites the bottle's `DllOverrides` registry keys: it
   merges the overrides it owns and leaves every other value alone. Previously

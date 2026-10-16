@@ -57,6 +57,13 @@ public struct ProgramOverrides: Codable, Equatable, Sendable {
     /// graphics setting a single D3D12 title needs to turn off on its own while
     /// the rest of the bottle keeps it.
     public var metal4Enabled: Bool?
+    /// Whether Apple's Metal performance HUD is drawn. `nil` inherits from bottle.
+    ///
+    /// The bottle setting reaches every process in the prefix, so turning it on
+    /// there also draws the HUD over a launcher's own windows. A program-level
+    /// value keeps the HUD on the title being measured and off the client the
+    /// player is still clicking around in.
+    public var metalHud: Bool?
 
     // MARK: - Performance
 
@@ -120,6 +127,8 @@ public struct ProgramOverrides: Codable, Equatable, Sendable {
             && dxvkHud == nil
             && enhancedSync == nil
             && metal4Enabled == nil
+            && metalHud == nil
+            && performancePreset == nil
             && shaderCacheEnabled == nil
             && controllerCompatibilityMode == nil
             && disableHIDAPI == nil
@@ -145,6 +154,8 @@ public struct ProgramOverrides: Codable, Equatable, Sendable {
         self.dxvkHud = try container.decodeIfPresent(DXVKHUD.self, forKey: .dxvkHud)
         self.enhancedSync = try container.decodeIfPresent(EnhancedSync.self, forKey: .enhancedSync)
         self.metal4Enabled = try container.decodeIfPresent(Bool.self, forKey: .metal4Enabled)
+        self.metalHud = try container.decodeIfPresent(Bool.self, forKey: .metalHud)
+        self.performancePreset = container.decodeLenientIfPresent(PerformancePreset.self, forKey: .performancePreset)
         self.shaderCacheEnabled = try container.decodeIfPresent(Bool.self, forKey: .shaderCacheEnabled)
         self.controllerCompatibilityMode = try container.decodeIfPresent(
             Bool.self, forKey: .controllerCompatibilityMode
