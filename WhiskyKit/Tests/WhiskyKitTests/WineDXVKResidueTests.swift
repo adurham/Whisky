@@ -23,7 +23,6 @@ final class WineDXVKResidueTests: XCTestCase {
     private var tempDir: URL!
     private var prefixRoot: URL!
     private var originalsDXGI: URL!
-    private var payloadDXGI: URL!
 
     /// A markerless (native) PE stub: the 16 bytes at 0x40 are not the
     /// builtin signature, so `Wine.isNativePE` classifies it as native.
@@ -41,17 +40,12 @@ final class WineDXVKResidueTests: XCTestCase {
         prefixRoot = tempDir.appending(path: "bottle")
         // An originals path that does not exist unless a test creates it.
         originalsDXGI = tempDir.appending(path: "store/originals/dxgi.dll")
-        // The DXMT payload the residue check compares against.
-        payloadDXGI = tempDir.appending(path: "payload/x64/dxgi.dll")
         for dir in ["system32", "syswow64"] {
             try FileManager.default.createDirectory(
                 at: prefixRoot.appending(path: "drive_c/windows/\(dir)"),
                 withIntermediateDirectories: true
             )
         }
-        try FileManager.default.createDirectory(
-            at: payloadDXGI.deletingLastPathComponent(), withIntermediateDirectories: true
-        )
     }
 
     override func tearDownWithError() throws {
@@ -66,50 +60,19 @@ final class WineDXVKResidueTests: XCTestCase {
         FileManager.default.fileExists(atPath: url.path(percentEncoded: false))
     }
 
-    private func remove() {
-        Wine.removeStaleNativeDXGI(
-            prefixRoot: prefixRoot, gptkOriginalsDXGI: originalsDXGI, dxmtPayloadDXGI: payloadDXGI
-        )
-    }
-
     /// The regression this guards: a DXMT launch leaves its native dxgi in
     /// both system directories, and the next DXVK launch must clear them.
     func testNativeResidueIsRemovedFromBothArches() throws {
-        try nativeFake("dxmt-copy").write(to: payloadDXGI)
-        try nativeFake("dxmt-copy").write(to: dxgi("system32"))
-        try nativeFake("dxmt-copy").write(to: dxgi("syswow64"))
+        try nativeFake("dxmt-64").write(to: dxgi("system32"))
+        try nativeFake("dxmt-32").write(to: dxgi("syswow64"))
         let bystander = prefixRoot.appending(path: "drive_c/windows/system32/d3d11.dll")
         try nativeFake("dxvk-d3d11").write(to: bystander)
 
-        remove()
+        Wine.removeStaleNativeDXGI(prefixRoot: prefixRoot, libraryFolder: noRuntime)
 
         XCTAssertFalse(exists(dxgi("system32")))
         XCTAssertFalse(exists(dxgi("syswow64")))
         XCTAssertTrue(exists(bystander), "only dxgi.dll may be touched")
-    }
-
-    /// The black-Steam bug this fix closes: a native dxgi that is *not* DXMT's
-    /// copy — wine's own, marker-stripped, deployed on purpose — must survive.
-    /// Deleting it makes `LoadLibrary("dxgi.dll")` fail and Chromium goes black.
-    func testNativeDXGIThatIsNotDXMTCopySurvives() throws {
-        try nativeFake("dxmt-copy").write(to: payloadDXGI)
-        try nativeFake("wine-native-marker-stripped").write(to: dxgi("system32"))
-        try nativeFake("wine-native-marker-stripped").write(to: dxgi("syswow64"))
-
-        remove()
-
-        XCTAssertTrue(exists(dxgi("system32")), "only DXMT's own copy may be removed")
-        XCTAssertTrue(exists(dxgi("syswow64")))
-    }
-
-    /// With no DXMT payload installed there is nothing to compare against, so no
-    /// file can be identified as DXMT residue and none is removed.
-    func testWithoutAPayloadNothingIsRemoved() throws {
-        try nativeFake("wine-native").write(to: dxgi("system32"))
-
-        remove()
-
-        XCTAssertTrue(exists(dxgi("system32")))
     }
 
     /// Wine's own fake DLL carries the builtin marker and must stay: it is
@@ -117,23 +80,7 @@ final class WineDXVKResidueTests: XCTestCase {
     func testBuiltinMarkedDXGIIsKept() throws {
         try builtinFake("wine-fake").write(to: dxgi("system32"))
 
-        remove()
-
-        XCTAssertTrue(exists(dxgi("system32")))
-    }
-
-    /// With GPTK originals present the builtin behind `,b` is Apple's
-    /// forwarder, so the removal must stand down and leave the prefix to the
-    /// originals-aware path.
-    func testNativeDXGIIsKeptWhenGPTKOriginalsExist() throws {
-        try FileManager.default.createDirectory(
-            at: originalsDXGI.deletingLastPathComponent(), withIntermediateDirectories: true
-        )
-        try builtinFake("backed-up-original").write(to: originalsDXGI)
-        try nativeFake("dxmt-copy").write(to: payloadDXGI)
-        try nativeFake("dxmt-copy").write(to: dxgi("system32"))
-
-        remove()
+        Wine.removeStaleNativeDXGI(prefixRoot: prefixRoot, libraryFolder: noRuntime)
 
         XCTAssertTrue(exists(dxgi("system32")))
     }
@@ -141,7 +88,7 @@ final class WineDXVKResidueTests: XCTestCase {
     /// A prefix that never saw DXMT has no dxgi.dll of its own; the removal
     /// must be a silent no-op.
     func testMissingDXGIIsANoOp() {
-        remove()
+        Wine.removeStaleNativeDXGI(prefixRoot: prefixRoot, libraryFolder: noRuntime)
 
         XCTAssertFalse(exists(dxgi("system32")))
         XCTAssertFalse(exists(dxgi("syswow64")))
@@ -153,8 +100,268 @@ final class WineDXVKResidueTests: XCTestCase {
     func testTruncatedFileIsLeftAlone() throws {
         try Data("stub".utf8).write(to: dxgi("system32"))
 
-        remove()
+        Wine.removeStaleNativeDXGI(prefixRoot: prefixRoot, libraryFolder: noRuntime)
 
         XCTAssertTrue(exists(dxgi("system32")))
+    }
+
+    // MARK: - Reconciliation against the GPTK payload
+
+    private func writeOriginals(_ contents: Data) throws {
+        try FileManager.default.createDirectory(
+            at: originalsDXGI.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try contents.write(to: originalsDXGI)
+    }
+
+    private func markerWindow(_ url: URL) throws -> Data {
+        try Data(contentsOf: url).subdata(in: 0x40 ..< 0x50)
+    }
+
+    /// With the payload deployed the builtin is Apple's forwarder, so the
+    /// stored original is installed and its builtin marker stripped, leaving a
+    /// file the loader takes as a true native PE.
+    func testDeployedPayloadInstallsStrippedOriginal() throws {
+        try writeOriginals(builtinFake("stored-original"))
+
+        Wine.reconcileDXGIForDXVK(
+            prefixRoot: prefixRoot,
+            gptkOriginalsDXGI: originalsDXGI,
+            gptkPayloadIsDeployed: true
+        )
+
+        XCTAssertTrue(exists(dxgi("system32")))
+        XCTAssertNotEqual(try markerWindow(dxgi("system32")), Data("Wine builtin DLL".utf8))
+        XCTAssertTrue(try Wine.isNativePE(dxgi("system32")))
+    }
+
+    /// The deploy replaces DXMT residue rather than leaving it behind.
+    func testDeployedPayloadReplacesExistingResidue() throws {
+        try writeOriginals(builtinFake("stored-original"))
+        try nativeFake("dxmt-64").write(to: dxgi("system32"))
+
+        Wine.reconcileDXGIForDXVK(
+            prefixRoot: prefixRoot,
+            gptkOriginalsDXGI: originalsDXGI,
+            gptkPayloadIsDeployed: true
+        )
+
+        XCTAssertTrue(try Wine.isNativePE(dxgi("system32")))
+        XCTAssertNotEqual(try Data(contentsOf: dxgi("system32")), nativeFake("dxmt-64"))
+    }
+
+    /// GPTK deploys forwarders into `x86_64-windows` only, so the 32-bit
+    /// builtin is still wine's own and the stored 64-bit original must not be
+    /// written into syswow64.
+    func testDeployedPayloadLeavesSysWOW64Alone() throws {
+        try writeOriginals(builtinFake("stored-original"))
+
+        Wine.reconcileDXGIForDXVK(
+            prefixRoot: prefixRoot,
+            gptkOriginalsDXGI: originalsDXGI,
+            gptkPayloadIsDeployed: true
+        )
+
+        XCTAssertFalse(exists(dxgi("syswow64")))
+    }
+
+    /// The stale-store case: `originals/` survives from a previous engine but
+    /// the payload is gone, so the builtin is wine's own again and residue in
+    /// *both* arches has to go. A store-keyed predicate would misread this as
+    /// "GPTK active" and leave the 32-bit bad pairing in place. What replaces
+    /// the residue is the runtime's own marked builtin, never an empty slot:
+    /// wine's loader only finds a builtin through that placeholder (#163).
+    func testStaleStoreReplacesResidueWithBuiltinInBothArches() throws {
+        try writeOriginals(builtinFake("stale-original"))
+        try nativeFake("dxmt-64").write(to: dxgi("system32"))
+        try nativeFake("dxmt-32").write(to: dxgi("syswow64"))
+
+        try Wine.reconcileDXGIForDXVK(
+            prefixRoot: prefixRoot,
+            gptkOriginalsDXGI: originalsDXGI,
+            gptkPayloadIsDeployed: false,
+            libraryFolder: makeRuntime()
+        )
+
+        XCTAssertEqual(try Data(contentsOf: dxgi("system32")), builtinFake("builtin-x86_64-windows"))
+        XCTAssertEqual(try Data(contentsOf: dxgi("syswow64")), builtinFake("builtin-i386-windows"))
+        XCTAssertFalse(try Wine.isNativePE(dxgi("system32")))
+        XCTAssertFalse(try Wine.isNativePE(dxgi("syswow64")))
+    }
+
+    /// Without the payload, wine's builtin-marked placeholder must survive a
+    /// DXVK launch: deleting it is a per-launch prefix mutation wineboot only
+    /// has to undo.
+    func testNotDeployedKeepsBuiltinPlaceholder() throws {
+        try builtinFake("wine-fake").write(to: dxgi("system32"))
+
+        Wine.reconcileDXGIForDXVK(
+            prefixRoot: prefixRoot,
+            gptkOriginalsDXGI: originalsDXGI,
+            gptkPayloadIsDeployed: false,
+            libraryFolder: noRuntime
+        )
+
+        XCTAssertTrue(exists(dxgi("system32")))
+        XCTAssertEqual(try Data(contentsOf: dxgi("system32")), builtinFake("wine-fake"))
+    }
+
+    /// A deployed payload with no stored dxgi backup has nothing to install;
+    /// the prefix is left as-is rather than emptied.
+    func testDeployedPayloadWithoutStoredOriginalIsANoOp() throws {
+        try builtinFake("wine-fake").write(to: dxgi("system32"))
+
+        Wine.reconcileDXGIForDXVK(
+            prefixRoot: prefixRoot,
+            gptkOriginalsDXGI: originalsDXGI,
+            gptkPayloadIsDeployed: true
+        )
+
+        XCTAssertEqual(try Data(contentsOf: dxgi("system32")), builtinFake("wine-fake"))
+    }
+
+    /// DXMT writes its native 32-bit dxgi into syswow64 too, and the deploy
+    /// only writes system32. With the payload deployed the 32-bit builtin is
+    /// still wine's own, so syswow64 residue gets the same guarded
+    /// remove-and-restore the not-deployed path gives it.
+    func testDeployedPayloadReplacesSysWOW64ResidueWithBuiltin() throws {
+        try writeOriginals(builtinFake("stored-original"))
+        try nativeFake("dxmt-32").write(to: dxgi("syswow64"))
+
+        try Wine.reconcileDXGIForDXVK(
+            prefixRoot: prefixRoot,
+            gptkOriginalsDXGI: originalsDXGI,
+            gptkPayloadIsDeployed: true,
+            libraryFolder: makeRuntime()
+        )
+
+        XCTAssertEqual(try Data(contentsOf: dxgi("syswow64")), builtinFake("builtin-i386-windows"))
+        XCTAssertTrue(try Wine.isNativePE(dxgi("system32")))
+        XCTAssertEqual(try strippedTail(dxgi("system32")), try strippedTail(originalsDXGI))
+    }
+
+    // MARK: - Idempotent deploy
+
+    /// The file contents outside the 16-byte marker window at 0x40.
+    private func strippedTail(_ url: URL) throws -> Data {
+        let data = try Data(contentsOf: url)
+        return data.subdata(in: 0 ..< 0x40) + data.subdata(in: 0x50 ..< data.count)
+    }
+
+    private func identity(_ url: URL) throws -> (inode: Int, mtime: Date) {
+        let attrs = try FileManager.default.attributesOfItem(atPath: url.path(percentEncoded: false))
+        let inode = try XCTUnwrap(attrs[.systemFileNumber] as? Int)
+        let mtime = try XCTUnwrap(attrs[.modificationDate] as? Date)
+        return (inode, mtime)
+    }
+
+    /// `enableDXVK` runs on every DXVK launch, so a prefix already holding the
+    /// stripped original must not be copied and patched again.
+    func testDeployedPayloadDoesNotRewriteMatchingDXGI() throws {
+        try writeOriginals(builtinFake("stored-original"))
+        let runtime = try makeRuntime()
+        Wine.reconcileDXGIForDXVK(
+            prefixRoot: prefixRoot,
+            gptkOriginalsDXGI: originalsDXGI,
+            gptkPayloadIsDeployed: true,
+            libraryFolder: runtime
+        )
+        let past = Date(timeIntervalSince1970: 1_000_000)
+        try FileManager.default.setAttributes(
+            [.modificationDate: past], ofItemAtPath: dxgi("system32").path(percentEncoded: false)
+        )
+        let before = try identity(dxgi("system32"))
+        let contents = try Data(contentsOf: dxgi("system32"))
+
+        Wine.reconcileDXGIForDXVK(
+            prefixRoot: prefixRoot,
+            gptkOriginalsDXGI: originalsDXGI,
+            gptkPayloadIsDeployed: true,
+            libraryFolder: runtime
+        )
+
+        let after = try identity(dxgi("system32"))
+        XCTAssertEqual(after.inode, before.inode)
+        XCTAssertEqual(after.mtime, before.mtime)
+        XCTAssertEqual(try Data(contentsOf: dxgi("system32")), contents)
+    }
+
+    /// A native file that differs from the original outside the marker
+    /// window (an older engine's original, or residue) is rewritten.
+    func testDeployedPayloadRewritesMismatchingNativeDXGI() throws {
+        try writeOriginals(builtinFake("stored-original"))
+        let stale = nativeFake("dxmt-64") + Data("stale-original".utf8)
+        try stale.write(to: dxgi("system32"))
+
+        Wine.reconcileDXGIForDXVK(
+            prefixRoot: prefixRoot,
+            gptkOriginalsDXGI: originalsDXGI,
+            gptkPayloadIsDeployed: true,
+            libraryFolder: noRuntime
+        )
+
+        XCTAssertTrue(try Wine.isNativePE(dxgi("system32")))
+        XCTAssertEqual(try strippedTail(dxgi("system32")), try strippedTail(originalsDXGI))
+    }
+
+    /// The original byte-for-byte, marker included, is builtin-marked and so
+    /// not the deployed state; it is rewritten and stripped.
+    func testDeployedPayloadStripsUnstrippedCopyOfOriginal() throws {
+        try writeOriginals(builtinFake("stored-original"))
+        try builtinFake("stored-original").write(to: dxgi("system32"))
+
+        Wine.reconcileDXGIForDXVK(
+            prefixRoot: prefixRoot,
+            gptkOriginalsDXGI: originalsDXGI,
+            gptkPayloadIsDeployed: true,
+            libraryFolder: noRuntime
+        )
+
+        XCTAssertTrue(try Wine.isNativePE(dxgi("system32")))
+    }
+
+    // MARK: - Placeholder restore
+
+    /// A runtime folder holding no builtins: removal then has nothing to put
+    /// back, which is the behaviour the removal tests above pin down.
+    private var noRuntime: URL {
+        tempDir.appending(path: "no-runtime")
+    }
+
+    /// A runtime folder laid out like an installed WhiskyWine, carrying a
+    /// marked builtin dxgi for each arch.
+    private func makeRuntime() throws -> URL {
+        let root = tempDir.appending(path: "runtime")
+        for arch in ["x86_64-windows", "i386-windows"] {
+            let dir = root.appending(path: "Wine/lib/wine/\(arch)")
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try builtinFake("builtin-\(arch)").write(to: dir.appending(path: "dxgi.dll"))
+        }
+        return root
+    }
+
+    /// Wine's loader only reaches a builtin through its system32 placeholder,
+    /// so clearing residue must leave the runtime's own marked copy behind,
+    /// not an empty slot that makes `dxgi.dll` unloadable (#163).
+    func testRemovedResidueIsReplacedByBuiltinPlaceholder() throws {
+        try nativeFake("dxmt64").write(to: dxgi("system32"))
+        try nativeFake("dxmt32").write(to: dxgi("syswow64"))
+
+        try Wine.removeStaleNativeDXGI(prefixRoot: prefixRoot, libraryFolder: makeRuntime())
+
+        XCTAssertEqual(try Data(contentsOf: dxgi("system32")), builtinFake("builtin-x86_64-windows"))
+        XCTAssertEqual(try Data(contentsOf: dxgi("syswow64")), builtinFake("builtin-i386-windows"))
+        XCTAssertFalse(try Wine.isNativePE(dxgi("system32")))
+        XCTAssertFalse(try Wine.isNativePE(dxgi("syswow64")))
+    }
+
+    /// A marked builtin already in place is the correct state and is not
+    /// rewritten, so a good bottle stays off the prefix-mutation path.
+    func testExistingBuiltinPlaceholderIsNotRewritten() throws {
+        try builtinFake("already-there").write(to: dxgi("system32"))
+
+        try Wine.removeStaleNativeDXGI(prefixRoot: prefixRoot, libraryFolder: makeRuntime())
+
+        XCTAssertEqual(try Data(contentsOf: dxgi("system32")), builtinFake("already-there"))
     }
 }

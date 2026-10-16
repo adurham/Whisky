@@ -97,7 +97,7 @@ public struct BottleInfo: Codable, Equatable {
 /// - **Wine Config**: Windows version, AVX, enhanced sync
 /// - **Metal Config**: Metal HUD, DXR, validation
 /// - **DXVK Config**: DXVK enable, async, HUD
-/// - **Performance Config**: Presets, shader cache, D3D11 mode
+/// - **Performance Config**: Shader cache, App Nap, VC++ runtime tracking
 ///
 /// ## Example
 ///
@@ -106,7 +106,6 @@ public struct BottleInfo: Codable, Equatable {
 /// settings.name = "Gaming"
 /// settings.windowsVersion = .win10
 /// settings.dxvk = true
-/// settings.performancePreset = .performance
 /// ```
 ///
 /// ## Topics
@@ -136,9 +135,7 @@ public struct BottleInfo: Codable, Equatable {
 /// - ``dxvkHud``
 ///
 /// ### Performance
-/// - ``performancePreset``
 /// - ``shaderCacheEnabled``
-/// - ``forceD3D11``
 /// - ``vcRedistInstalled``
 public struct BottleSettings: Codable, Equatable {
     /// The current file format version for settings serialization.
@@ -375,9 +372,12 @@ public struct BottleSettings: Codable, Equatable {
     ///
     /// Controls which translation layer is used for Direct3D rendering.
     /// `.recommended` resolves to a concrete backend at launch time based on GPU/OS heuristics.
+    ///
+    /// Changing it clears `launcherSwitchedBackend`: whatever changed it, the
+    /// backend is no longer the one a launcher profile left behind.
     public var graphicsBackend: GraphicsBackend {
         get { graphicsConfig.backend }
-        set { graphicsConfig.backend = newValue }
+        set { setBackend(newValue) }
     }
 
     /// Whether this bottle opts in to D3DMetal's DLSS-to-MetalFX path.
@@ -427,7 +427,14 @@ public struct BottleSettings: Codable, Equatable {
     /// switches the backend to `.dxvk`; setting to `false` switches to `.recommended`.
     public var dxvk: Bool {
         get { graphicsConfig.backend == .dxvk }
-        set { graphicsConfig.backend = newValue ? .dxvk : .recommended }
+        set { setBackend(newValue ? .dxvk : .recommended) }
+    }
+
+    private mutating func setBackend(_ backend: GraphicsBackend) {
+        if backend != graphicsConfig.backend {
+            launcherConfig.backendSwitchedByLauncher = false
+        }
+        graphicsConfig.backend = backend
     }
 
     /// Whether DXVK async shader compilation is enabled.
@@ -527,15 +534,6 @@ public struct BottleSettings: Codable, Equatable {
 
     // MARK: - Performance settings
 
-    /// The performance optimization preset.
-    ///
-    /// Presets configure multiple settings at once for different
-    /// use cases like gaming, quality, or Unity games.
-    public var performancePreset: PerformancePreset {
-        get { performanceConfig.performancePreset }
-        set { performanceConfig.performancePreset = newValue }
-    }
-
     /// Whether shader caching is enabled.
     ///
     /// Shader caching reduces stuttering after the first run
@@ -543,15 +541,6 @@ public struct BottleSettings: Codable, Equatable {
     public var shaderCacheEnabled: Bool {
         get { performanceConfig.shaderCacheEnabled }
         set { performanceConfig.shaderCacheEnabled = newValue }
-    }
-
-    /// Whether to force DirectX 11 mode instead of DirectX 12.
-    ///
-    /// Some games have better compatibility with D3D11. Enable
-    /// this if experiencing issues with graphics or crashes.
-    public var forceD3D11: Bool {
-        get { performanceConfig.forceD3D11 }
-        set { performanceConfig.forceD3D11 = newValue }
     }
 
     /// Whether Visual C++ Redistributable is installed in this bottle.
@@ -634,12 +623,38 @@ public struct BottleSettings: Codable, Equatable {
         set { launcherConfig.networkTimeout = newValue }
     }
 
-    /// Whether to automatically enable DXVK when launcher requires it.
+    /// Whether to force DXVK in a bottle whose launcher requires it.
     ///
-    /// Rockstar Games Launcher requires DXVK to render logo screen.
+    /// Only Rockstar Games Launcher does (``LauncherType/requiresDXVK``): it
+    /// cannot render its logo screen without DXVK. When on, detecting it
+    /// switches the bottle to DXVK, and every launch in the bottle deploys
+    /// DXVK and (in launcher compatibility mode) gets its DLL overrides,
+    /// whatever ``graphicsBackend`` says.
+    /// Every launcher already resolves to DXVK under `.recommended`.
     public var autoEnableDXVK: Bool {
         get { launcherConfig.autoEnableDXVK }
         set { launcherConfig.autoEnableDXVK = newValue }
+    }
+
+    /// The last ``LauncherBackendMigration`` this bottle has been through.
+    var launcherBackendMigration: Int {
+        get { launcherConfig.backendMigration }
+        set { launcherConfig.backendMigration = newValue }
+    }
+
+    /// Whether the graphics settings say that ``LauncherBackendMigration`` put
+    /// this bottle back on Recommended. Cleared once the user has seen it.
+    public var launcherBackendResetNotice: Bool {
+        get { launcherConfig.backendResetNotice }
+        set { launcherConfig.backendResetNotice = newValue }
+    }
+
+    /// Whether a launcher profile, not the user, switched this bottle from
+    /// Recommended to DXVK. Set after the switch, since changing the backend
+    /// clears it.
+    var launcherSwitchedBackend: Bool {
+        get { launcherConfig.backendSwitchedByLauncher }
+        set { launcherConfig.backendSwitchedByLauncher = newValue }
     }
 
     // MARK: - Controller and input settings
@@ -887,10 +902,14 @@ public struct BottleSettings: Codable, Equatable {
     ///     ``GraphicsBackendResolver`` and therefore depends on the machine's
     ///     installed runtime — tests pin an explicit value so the suite answers
     ///     the same everywhere.
+    ///   - builtinD3D12IsD3DMetal: Whether the runtime's builtin `d3d12` is
+    ///     D3DMetal's, which decides whether the DXVK and DXMT presets turn it
+    ///     off. Defaults to whether the GPTK payload is deployed.
     /// - Returns: Managed DLL override entries with their sources for the DLLOverrideResolver.
     public func populateBottleManagedLayer(
         builder: inout EnvironmentBuilder,
-        resolvedBackend: GraphicsBackend? = nil
+        resolvedBackend: GraphicsBackend? = nil,
+        builtinD3D12IsD3DMetal: Bool = GPTKImporter.isDeployed()
     ) -> [(entry: DLLOverrideEntry, source: DLLOverrideSource)] {
         var managedDLLOverrides: [(entry: DLLOverrideEntry, source: DLLOverrideSource)] = []
 
@@ -956,7 +975,7 @@ public struct BottleSettings: Codable, Equatable {
 
         case .dxvk:
             // DXVK: DLL overrides + env vars
-            for entry in DLLOverrideResolver.dxvkPreset {
+            for entry in DLLOverrideResolver.dxvkPreset(builtinD3D12IsD3DMetal: builtinD3D12IsD3DMetal) {
                 managedDLLOverrides.append((entry: entry, source: .dxvk))
             }
             switch dxvkHud {
@@ -977,7 +996,7 @@ public struct BottleSettings: Codable, Equatable {
             // DXMT: native overrides for the D3D11 trio plus the builtin
             // winemetal bridge. No env vars in v1; the file placement happens
             // in `Wine.enableDXMT` at launch.
-            for entry in DLLOverrideResolver.dxmtPreset {
+            for entry in DLLOverrideResolver.dxmtPreset(builtinD3D12IsD3DMetal: builtinD3D12IsD3DMetal) {
                 managedDLLOverrides.append((entry: entry, source: .dxmt))
             }
 
@@ -1030,25 +1049,17 @@ public struct BottleSettings: Codable, Equatable {
             builder.set("MTL_DEBUG_LAYER", "1", layer: .bottleManaged)
         }
 
-        // The old sequoiaCompatMode block is gone: all three values it set
-        // (MTL_DEBUG_LAYER, D3DM_VALIDATION, WINEFSYNC) are platform-layer
-        // fixes on every supported macOS, so the toggle's off position changed
-        // nothing and its on position only hid the provenance.
-
-        // Performance preset handling (whisky-app/whisky#1361 - FPS regression fix)
-        populatePerformancePreset(builder: &builder)
+        // The old sequoiaCompatMode block is gone: of the three values it set,
+        // MTL_DEBUG_LAYER and WINEFSYNC are platform-layer fixes on every
+        // supported macOS and D3DM_VALIDATION is read by no runtime, so the
+        // toggle's off position changed nothing and its on position only hid
+        // the provenance.
 
         // Shader cache control. DXVK_STATE_CACHE is the variable DXVK actually
         // reads; the previous pair (a compile-thread throttle and an NVIDIA GL
         // driver variable) changed nothing on this platform.
         if !shaderCacheEnabled {
             builder.set("DXVK_STATE_CACHE", "0", layer: .bottleManaged)
-        }
-
-        // Force D3D11 mode - helps with compatibility (whisky-app/whisky#1361)
-        if forceD3D11 {
-            builder.set("D3DM_FORCE_D3D11", "1", layer: .bottleManaged)
-            builder.set("D3DM_FEATURE_LEVEL_12_0", "0", layer: .bottleManaged)
         }
 
         return managedDLLOverrides
@@ -1064,10 +1075,15 @@ public struct BottleSettings: Codable, Equatable {
     /// - Configures GPU spoofing for launcher checks
     /// - Sets network timeouts for download reliability
     ///
-    /// - Parameter builder: The environment builder to populate.
+    /// - Parameters:
+    ///   - builder: The environment builder to populate.
+    ///   - builtinD3D12IsD3DMetal: Whether the runtime's builtin `d3d12` is
+    ///     D3DMetal's, passed on to the DXVK preset a launcher can require.
+    ///     Defaults to whether the GPTK payload is deployed.
     /// - Returns: Launcher-required DLL override entries with their sources.
     public func populateLauncherManagedLayer(
-        builder: inout EnvironmentBuilder
+        builder: inout EnvironmentBuilder,
+        builtinD3D12IsD3DMetal: Bool = GPTKImporter.isDeployed()
     ) -> [(entry: DLLOverrideEntry, source: DLLOverrideSource)] {
         var launcherDLLOverrides: [(entry: DLLOverrideEntry, source: DLLOverrideSource)] = []
 
@@ -1084,15 +1100,9 @@ public struct BottleSettings: Codable, Equatable {
             }
             launcherProvidesLocale = fixDetails.contains { $0.key == "LC_ALL" }
 
-            // Auto-enable DXVK DLL overrides if launcher requires it.
-            //
-            // Only for launchers wanting DXVK bottle-wide. A `.launcherProcesses`
-            // launcher gets the same preset written to its own `AppDefaults`
-            // keys in `WineDLLOverrideRegistry.applyDLLOverrides`, because these
-            // land in the bottle's `WINEDLLOVERRIDES`, which every child
-            // inherits -- that would take D3DMetal away from the games too.
-            if autoEnableDXVK, launcher.dxvkScope == .bottle {
-                for entry in DLLOverrideResolver.dxvkPreset {
+            // Auto-enable DXVK DLL overrides if launcher requires it
+            if autoEnableDXVK, launcher.requiresDXVK {
+                for entry in DLLOverrideResolver.dxvkPreset(builtinD3D12IsD3DMetal: builtinD3D12IsD3DMetal) {
                     launcherDLLOverrides.append((entry: entry, source: .launcher(launcher.displayName)))
                 }
             }
@@ -1141,19 +1151,20 @@ public struct BottleSettings: Codable, Equatable {
         return launcherDLLOverrides
     }
 
-    /// The GPU spoof environment with feature-level keys resolved against the
-    /// bottle's own settings.
+    /// The GPU spoof environment with the ray tracing key resolved against
+    /// the bottle's own settings.
     ///
-    /// Feature level is one resolved decision: force-D3D11 already pinned 12_0
-    /// off in the bottle layer, and the spoof's layer wins, so leaving these
-    /// keys in would silently undo the setting that sits beside the spoof in
-    /// the same screen.
+    /// Ray tracing has its own toggle, ``dxrEnabled``, whose bottle layer sets `D3DM_SUPPORT_DXR` when it is on.
+    /// Unlike the rest of the spoof, that one is read by D3DMetal. It
+    /// only matters to games, since launcher UIs render on DXVK, and every game
+    /// a launcher starts inherits the launcher's environment. So the spoof
+    /// turned DXR on for every game in a bottle that Play had configured for
+    /// Steam, over the toggle (off by default, and not offered at all on Macs
+    /// without hardware ray tracing) and over the troubleshooter's "Disable Ray
+    /// Tracing" fix.
     private func spoofEnvironment() -> [String: String] {
         var gpuEnv = GPUDetection.spoofWithVendor(gpuVendor)
-        if forceD3D11 {
-            gpuEnv.removeValue(forKey: "D3DM_FEATURE_LEVEL_12_0")
-            gpuEnv.removeValue(forKey: "D3DM_FEATURE_LEVEL_12_1")
-        }
+        gpuEnv.removeValue(forKey: "D3DM_SUPPORT_DXR")
         return gpuEnv
     }
 
@@ -1205,54 +1216,6 @@ public struct BottleSettings: Codable, Equatable {
         // Audio settings are applied via Wine registry (WineAudioRegistry), not env vars.
         // This placeholder ensures the EnvironmentBuilder cascade has an audio integration
         // point for future audio-related environment variables.
-    }
-
-    /// Populates performance preset environment variables into the bottleManaged layer.
-    private func populatePerformancePreset(builder: inout EnvironmentBuilder) {
-        switch performancePreset {
-        case .balanced:
-            // Default settings, no changes needed
-            break
-
-        case .performance:
-            // Performance mode - prioritize FPS over visual quality (whisky-app/whisky#1361 fix)
-            // Disable extra validation that can slow down rendering
-            builder.set("D3DM_VALIDATION", "0", layer: .bottleManaged)
-            builder.set("MTL_DEBUG_LAYER", "0", layer: .bottleManaged)
-            // Enable DXVK async if not already enabled via the DXVK setting
-            if !dxvkAsync {
-                builder.set("DXVK_ASYNC", "1", layer: .bottleManaged)
-            }
-            // Use more aggressive shader compilation
-            builder.set("DXVK_SHADER_OPT_LEVEL", "0", layer: .bottleManaged)
-            // Reduce Metal resource tracking overhead
-            builder.set("MTL_ENABLE_METAL_EVENTS", "0", layer: .bottleManaged)
-
-        case .quality:
-            // Quality mode - prioritize visuals over performance
-            // Enable shader optimizations
-            builder.set("DXVK_SHADER_OPT_LEVEL", "2", layer: .bottleManaged)
-
-        case .unity:
-            // Unity games optimization (whisky-app/whisky#1313, #1312 - il2cpp fix)
-            // Unity games often need specific memory and threading settings
-
-            // Fix for il2cpp loading issues
-            builder.set("MONO_THREADS_SUSPEND", "1", layer: .bottleManaged)
-            // Increase file descriptor limit for Unity games
-            builder.set("WINE_LARGE_ADDRESS_AWARE", "65536", layer: .bottleManaged)
-
-            // Unity games often work better with D3D11
-            if !forceD3D11 {
-                builder.set("D3DM_FORCE_D3D11", "1", layer: .bottleManaged)
-            }
-
-            // Help with thread management for Unity's job system
-            builder.set("WINE_DISABLE_NTDLL_THREAD_REGS", "1", layer: .bottleManaged)
-
-            // Unity games may need more virtual memory
-            builder.set("WINEPRELOADRESERVE", "1", layer: .bottleManaged)
-        }
     }
 
     // MARK: - Deprecated Environment Variable API

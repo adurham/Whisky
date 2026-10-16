@@ -94,7 +94,6 @@ final class BottleVM: ObservableObject {
         /// install the missing Wine runtime directly.
         let isRuntimeMissing: Bool
     }
-
     func loadBottles() {
         // Keep the live instance for any bottle that is mid-operation:
         // rebuilding it would reset inFlight and drop the guard that blocks
@@ -102,6 +101,16 @@ final class BottleVM: ObservableObject {
         let inFlight = Dictionary(bottles.filter(\.inFlight).map { ($0.url, $0) }) { first, _ in first }
         bottles = bottlesList.loadBottles().map { inFlight[$0.url] ?? $0 }
         GameHealthMonitor.registerPrograms(in: bottles)
+        migrateLauncherBackends()
+    }
+
+    /// Runs ``LauncherBackendMigration`` on every bottle, here and not in WhiskyKit's
+    /// loader so WhiskyCmd never rewrites settings. Also run after a GPTK deploy.
+    func migrateLauncherBackends() {
+        let d3dMetalInstalled = WhiskyWineInstaller.isD3DMetalInstalled()
+        for bottle in bottles where bottle.isAvailable && !bottle.inFlight {
+            LauncherBackendMigration.migrateIfNeeded(bottle, d3dMetalInstalled: d3dMetalInstalled)
+        }
     }
 
     /// Bottles found on disk with no registry entry, awaiting a re-import

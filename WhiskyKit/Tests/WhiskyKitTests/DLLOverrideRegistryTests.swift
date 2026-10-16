@@ -287,17 +287,17 @@ final class DLLOverrideRegistryTests: XCTestCase {
         XCTAssertEqual(LauncherType.rockstar.dxvkScope, .bottle)
     }
 
-    /// `requiresDXVK` gates the prefix DLL copy in `runProgram`, so it has to
-    /// stay true for both scopes or Steam gets overrides pointing at DLLs that
-    /// were never deployed.
-    func testRequiresDXVKCoversBothScopes() {
-        XCTAssertTrue(LauncherType.steam.requiresDXVK)
+    /// `requiresDXVK` marks the launchers whose own UI cannot render without DXVK
+    /// bottle-wide (Rockstar). Steam needs DXVK only on its own processes and is
+    /// deployed through the launch path instead, so it must stay false here.
+    func testRequiresDXVKIsRockstarOnly() {
+        XCTAssertFalse(LauncherType.steam.requiresDXVK)
         XCTAssertTrue(LauncherType.rockstar.requiresDXVK)
         XCTAssertFalse(LauncherType.epicGames.requiresDXVK)
     }
 
     func testApplyingMergesPresetOverExistingOverrides() {
-        let merged = Wine.applying(DLLOverrideResolver.dxvkPreset, to: "dxgi=b;nvapi64=")
+        let merged = Wine.applying(DLLOverrideResolver.dxvkPreset(builtinD3D12IsD3DMetal: true), to: "dxgi=b;nvapi64=")
         let parsed = Wine.parseDLLOverrides(merged)
         // The preset wins on the DLLs it names.
         XCTAssertEqual(parsed["dxgi"], "n,b")
@@ -309,7 +309,7 @@ final class DLLOverrideRegistryTests: XCTestCase {
     }
 
     func testApplyingLeavesUnrelatedOverridesAlone() {
-        let merged = Wine.applying(DLLOverrideResolver.dxvkPreset, to: "winemenubuilder=")
+        let merged = Wine.applying(DLLOverrideResolver.dxvkPreset(builtinD3D12IsD3DMetal: true), to: "winemenubuilder=")
         XCTAssertEqual(Wine.parseDLLOverrides(merged)["winemenubuilder"], "")
     }
 

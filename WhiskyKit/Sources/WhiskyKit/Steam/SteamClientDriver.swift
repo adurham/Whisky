@@ -107,18 +107,12 @@ open class WineSteamClientDriver: SteamClientDriver {
     }
 
     open func processList() async -> [WineProcess] {
-        guard let output = try? await Wine.runWine(["tasklist.exe", "/FO", "CSV"], bottle: bottle) else {
-            return []
-        }
-        return Wine.parseTasklistOutput(output)
+        await (try? Wine.listProcesses(for: bottle)) ?? []
     }
 
     /// `steam.exe -silent` runs for the whole session, so the run is never awaited.
     open func startClient(steamExe: URL) {
-        let bottle = self.bottle
-        Task {
-            _ = try? await Wine.runProgram(at: steamExe, args: ["-silent"], bottle: bottle)
-        }
+        SteamLauncher.startClient(steamExe: steamExe, bottle: bottle)
     }
 
     /// Through the shared path, which carries the locale, DXVK and
@@ -132,7 +126,10 @@ open class WineSteamClientDriver: SteamClientDriver {
     /// to the client. The returned task can outlive the game, so it is never
     /// awaited. The install URL is already known, which saves a library rescan.
     open func launchGame(_ game: SteamGame) throws {
-        _ = try SteamLauncher.launch(appId: game.appId, bottle: bottle, installURL: game.installURL)
+        // The orchestrator has started the client or found it running already.
+        _ = try SteamLauncher.launch(
+            appId: game.appId, bottle: bottle, installURL: game.installURL, clientIsRunning: true
+        )
     }
 
     open func killProcess(winePID: Int32) async {

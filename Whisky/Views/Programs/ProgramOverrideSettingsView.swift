@@ -349,24 +349,13 @@ struct ProgramOverrideSettingsView: View {
             if hasPerformanceOverride {
                 performanceControls
             } else {
-                inheritedSummary(
-                    "\(bottle.settings.performancePreset.description()), "
-                        + "Shader Cache \(bottle.settings.shaderCacheEnabled ? "On" : "Off"), "
-                        + "Force D3D11 \(bottle.settings.forceD3D11 ? "On" : "Off")"
-                )
+                inheritedSummary("Shader Cache \(bottle.settings.shaderCacheEnabled ? "On" : "Off")")
             }
         }
     }
 
-    @ViewBuilder
     private var performanceControls: some View {
-        Picker("config.performancePreset", selection: performancePresetBinding) {
-            ForEach(PerformancePreset.allCases, id: \.self) { preset in
-                Text(preset.description()).tag(preset)
-            }
-        }
         Toggle("config.shaderCache", isOn: shaderCacheBinding)
-        Toggle("config.forceD3D11", isOn: forceD3D11Binding)
     }
 
     // MARK: - Input Group
@@ -621,7 +610,7 @@ struct ProgramOverrideSettingsView: View {
     }
 
     private var hasPerformanceOverride: Bool {
-        program.settings.overrides?.performancePreset != nil
+        program.settings.overrides?.shaderCacheEnabled != nil
     }
 
     private var hasInputOverride: Bool {
@@ -648,7 +637,7 @@ struct ProgramOverrideSettingsView: View {
     private var computedManagedOverrides: [(entry: DLLOverrideEntry, source: String)] {
         var managed: [(entry: DLLOverrideEntry, source: String)] = []
         if bottle.settings.graphicsBackend == .dxvk {
-            for entry in DLLOverrideResolver.dxvkPreset {
+            for entry in DLLOverrideResolver.dxvkPreset(builtinD3D12IsD3DMetal: GPTKImporter.isDeployed()) {
                 managed.append((
                     entry: entry,
                     source: String(localized: "config.dllOverrides.source.dxvk")
@@ -716,13 +705,9 @@ struct ProgramOverrideSettingsView: View {
             set: { isOn in
                 ensureOverrides()
                 if isOn {
-                    program.settings.overrides?.performancePreset = bottle.settings.performancePreset
                     program.settings.overrides?.shaderCacheEnabled = bottle.settings.shaderCacheEnabled
-                    program.settings.overrides?.forceD3D11 = bottle.settings.forceD3D11
                 } else {
-                    program.settings.overrides?.performancePreset = nil
                     program.settings.overrides?.shaderCacheEnabled = nil
-                    program.settings.overrides?.forceD3D11 = nil
                 }
             }
         )
@@ -839,24 +824,10 @@ struct ProgramOverrideSettingsView: View {
         )
     }
 
-    private var performancePresetBinding: Binding<PerformancePreset> {
-        Binding(
-            get: { program.settings.overrides?.performancePreset ?? bottle.settings.performancePreset },
-            set: { program.settings.overrides?.performancePreset = $0 }
-        )
-    }
-
     private var shaderCacheBinding: Binding<Bool> {
         Binding(
             get: { program.settings.overrides?.shaderCacheEnabled ?? bottle.settings.shaderCacheEnabled },
             set: { program.settings.overrides?.shaderCacheEnabled = $0 }
-        )
-    }
-
-    private var forceD3D11Binding: Binding<Bool> {
-        Binding(
-            get: { program.settings.overrides?.forceD3D11 ?? bottle.settings.forceD3D11 },
-            set: { program.settings.overrides?.forceD3D11 = $0 }
         )
     }
 

@@ -178,7 +178,6 @@ public enum DiagnosticExporter {
         section += "- **Graphics Backend:** \(bottle.settings.graphicsBackend)\n"
         section += "- **DXVK Async:** \(bottle.settings.dxvkAsync ? "Enabled" : "Disabled")\n"
         section += "- **Enhanced Sync:** \(bottle.settings.enhancedSync)\n"
-        section += "- **Performance Preset:** \(bottle.settings.performancePreset)\n"
         section += "\n"
         return section
     }
@@ -256,11 +255,9 @@ public enum DiagnosticExporter {
         info["graphicsBackend"] = "\(bottle.settings.graphicsBackend)"
         info["dxvkAsync"] = "\(bottle.settings.dxvkAsync)"
         info["enhancedSync"] = "\(bottle.settings.enhancedSync)"
-        info["performancePreset"] = "\(bottle.settings.performancePreset)"
         info["metalHud"] = "\(bottle.settings.metalHud)"
         info["metalValidation"] = "\(bottle.settings.metalValidation)"
         info["dxrEnabled"] = "\(bottle.settings.dxrEnabled)"
-        info["forceD3D11"] = "\(bottle.settings.forceD3D11)"
         info["shaderCacheEnabled"] = "\(bottle.settings.shaderCacheEnabled)"
         info["avxEnabled"] = "\(bottle.settings.avxEnabled)"
         info["sequoiaCompatMode"] = "\(bottle.settings.sequoiaCompatMode)"
